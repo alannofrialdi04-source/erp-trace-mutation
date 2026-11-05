@@ -38,6 +38,9 @@ test('tahapRekap & tahapMinus memakai batas periode dan cut-off', () => {
   const minus = m.tahapMinus(r);
   assert.ok(minus.some((s) => s.$setWindowFields && s.$setWindowFields.partitionBy === '$kodeBarang'));
   assert.ok(JSON.stringify(minus).includes('"$shift"'), 'saldo sebelum baris dihitung dengan $shift (transisi ke minus)');
+  const harian = JSON.stringify(m.tahapMinus(r, { per: 'hari', tz: '+07:00' }));
+  assert.ok(harian.includes('"$dateToString"') && harian.includes('"timezone":"+07:00"'), 'saldo per akhir hari WIB');
+  assert.ok(!JSON.stringify(minus).includes('"$dateToString"'), 'default per transaksi');
 });
 
 test('pivotRekap: saldo awal/masuk/keluar/akhir, per asal, bucket khusus', () => {
@@ -73,8 +76,19 @@ test('tandaiRekap & bobotTanda', () => {
   assert.deepEqual(m.tandaiRekap(Object.assign({}, dasar, { awal: -2, akhir: -2, satuan: { A: 1, B: 1 } }), { master: null, cekMaster: true, minus: null }),
     ['MINUS', 'AWAL_MINUS', 'TIDAK_DI_MASTER', 'SATUAN_CAMPUR']);
   assert.deepEqual(m.tandaiRekap(Object.assign({}, dasar, { akhir: -0.0000001 }), { master: {}, cekMaster: false, minus: null }), [], 'toleransi pembulatan');
+  assert.deepEqual(m.tandaiRekap(dasar, { master: {}, cekMaster: true, minus: null, minusSesaat: true }), ['MINUS_SESAAT']);
+  assert.deepEqual(m.tandaiRekap(dasar, { master: {}, cekMaster: true, minus: {}, minusSesaat: true }), ['PERNAH_MINUS'], 'sesaat tidak dobel');
   assert.ok(m.bobotTanda(['SEBELUM_CUTOFF', 'MINUS']) < m.bobotTanda(['PERNAH_MINUS']));
+  assert.ok(m.bobotTanda(['MINUS_SESAAT']) > m.bobotTanda(['SEBELUM_CUTOFF']));
   assert.ok(m.bobotTanda([]) > m.bobotTanda(['TANPA_TANGGAL']));
+});
+
+test('bulatkanDesimal: setengah ke atas, tahan galat floating point', () => {
+  assert.equal(m.bulatkanDesimal(1.235, 2), 1.24);
+  assert.equal(m.bulatkanDesimal(1.005, 2), 1.01);
+  assert.equal(m.bulatkanDesimal(1.2345, 2), 1.23);
+  assert.equal(m.bulatkanDesimal(1171.695, 2), 1171.7);
+  assert.equal(m.bulatkanDesimal(12.5, 0), 13);
 });
 
 test('kunciIdHex', () => {

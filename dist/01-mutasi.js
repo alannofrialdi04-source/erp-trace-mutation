@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- *  ERP Trace Mutation | 01-mutasi | v0.4.0
+ *  ERP Trace Mutation | 01-mutasi | v0.5.0
  *  Mutasi stok per kode barang: rekap periode (saldo awal, masuk, keluar, saldo akhir) dan kartu stok
  * ----------------------------------------------------------------------------
  *  FILE HASIL BUILD. Yang boleh diedit hanya blok KONFIGURASI di bawah.
@@ -39,6 +39,11 @@ var CONFIG = {
 
   // Transaksi sebelum tanggal ini ditandai SEBELUM_CUTOFF (tetap dihitung). null = tidak dicek.
   TANGGAL_CUTOFF: '2025-08-18',
+
+  // Kapan saldo dinilai minus:
+  //   'hari'      = saldo AKHIR HARI (minus sesaat karena urutan jam input diberi tanda MINUS_SESAAT)
+  //   'transaksi' = setelah setiap transaksi
+  MINUS_PER: 'hari',
 
   // Rekap: hanya tampilkan kode yang punya tanda masalah
   HANYA_BERMASALAH: false,
@@ -100,6 +105,7 @@ var CONFIG = {
  *
  * DOKUMEN HITUNG FISIK (opname)
  *   opname.<nama>.field : kodeBarang, qty, tanggal (wajib), companyCode, noReg, noBap, satuan, nama
+ *   opname.<nama>.desimal : (opsional) jumlah desimal qty dokumen; saldo buku dibulatkan sama sebelum dibandingkan
  *   MONSUS = monitoring khusus Bea Cukai, setara hasil opname tahunan.
  */
 var MAPPING = {
@@ -128,6 +134,8 @@ var MAPPING = {
     monsus: {
       label: 'Monitoring khusus Bea Cukai (hasil opname)',
       koleksi: 'tbl_monsusdetail',
+      // qty MONSUS dibulatkan 2 desimal (rekon 2026-01: 32 kode beda <= 0,005 karena pembulatan)
+      desimal: 2,
       field: {
         kodeBarang: 'kodeBarang',
         qty: 'qty',
@@ -932,8 +940,12 @@ function _validasiOpname(opname, err, warn) {
       err(p, 'harus berupa objek { label, koleksi, field }');
       continue;
     }
-    _kunciAsing(p, o, ['label', 'koleksi', 'field'], warn);
+    _kunciAsing(p, o, ['label', 'koleksi', 'field', 'desimal'], warn);
     if (!_teksIsi(o.koleksi)) err(p + '.koleksi', 'wajib diisi nama koleksi');
+    if (o.desimal !== undefined && o.desimal !== null &&
+        (typeof o.desimal !== 'number' || Math.floor(o.desimal) !== o.desimal || o.desimal < 0 || o.desimal > 6)) {
+      err(p + '.desimal', 'harus bilangan bulat 0-6 (jumlah desimal qty di dokumen opname)');
+    }
     if (!_objekBiasa(o.field)) {
       err(p + '.field', 'wajib berupa objek { kodeBarang, qty, tanggal, ... }');
       continue;
@@ -1352,11 +1364,17 @@ function filterDiHeader(sumber, filterLogis) {
 var EPS_MUTASI = 1e-6;
 var URUTAN_TANDA = [
   'MINUS', 'AWAL_MINUS', 'PERNAH_MINUS', 'TIDAK_DI_MASTER', 'SATUAN_CAMPUR', 'SEBELUM_CUTOFF',
-  'ARAH_TIDAK_DIKENAL', 'QTY_KOSONG', 'TANPA_TANGGAL',
+  'MINUS_SESAAT', 'ARAH_TIDAK_DIKENAL', 'QTY_KOSONG', 'TANPA_TANGGAL',
 ];
 
 function bulatkan(n) {
   return Math.round(n * 1e6) / 1e6;
+}
+
+/** Bulatkan ke d desimal (setengah ke atas), tahan galat floating point: 1,235 -> 1,24 */
+function bulatkanDesimal(n, d) {
+  var f = Math.pow(10, d);
+  return Math.round(parseFloat((n * f).toFixed(8))) / f;
 }
 
 /** Nama sumber yang ikut dihitung (hitungMutasi bukan false), sesuai urutan di MAPPING */
@@ -1438,16 +1456,46 @@ function tahapRekap(rentang, cutoff) {
 
 /**
  * Tahap agregasi saldo berjalan per kode ($setWindowFields + $shift, MongoDB 5.0+).
- * Hasil hanya untuk kode yang saldonya minus di salah satu baris DI DALAM periode:
- *   transisi = true  -> baris pertama di periode yang membuat saldo berubah dari >= 0 menjadi minus
- *   transisi = false -> tidak ada transisi di periode: saldo sudah minus sejak sebelum periode;
- *                       baris yang dikembalikan = baris minus pertama di periode
- *   + saldoMin, barisMinus (jumlah baris dengan saldo minus di periode)
+ *   opsi.per = 'hari'      -> saldo dinilai per AKHIR HARI (zona waktu opsi.tz). Minus sesaat di tengah hari
+ *                             karena urutan jam input tidak dihitung.
+ *   opsi.per = 'transaksi' -> saldo dinilai setelah setiap transaksi.
+ * Hasil hanya untuk kode yang saldonya minus di periode:
+ *   transisi = true  -> titik pertama di periode saat saldo berubah dari >= 0 menjadi minus
+ *   transisi = false -> saldo sudah minus sejak sebelum periode (tidak ada transisi di periode)
+ *   + saldoSebelum, saldo, saldoMin, jumlahMinus (jumlah hari/transaksi dengan saldo minus di periode)
+ *   per hari      : hari, masukHari, keluarHari, dokHari
+ *   per transaksi : asal, arah, qty, docId, idAsal
  */
-function tahapMinus(rentang) {
-  var urut = { tanggal: 1, urutArah: 1, docId: 1 };
-  return [
-    { $match: { tanggalTipe: 'date', tanggal: { $lt: rentang.lt } } },
+function tahapMinus(rentang, opsi) {
+  opsi = opsi || {};
+  var harian = opsi.per === 'hari';
+  var tahap = [{ $match: { tanggalTipe: 'date', tanggal: { $lt: rentang.lt } } }];
+  var urut;
+  var urutAkhir;
+  if (harian) {
+    tahap.push({
+      $group: {
+        _id: {
+          kode: '$kodeBarang',
+          hari: { $dateToString: { format: '%Y-%m-%d', date: '$tanggal', timezone: opsi.tz || TZ_DEFAULT } },
+        },
+        qtyBertanda: { $sum: '$qtyBertanda' },
+        masuk: { $sum: { $cond: [{ $eq: ['$arah', 'IN'] }, { $ifNull: ['$qty', 0] }, 0] } },
+        keluar: { $sum: { $cond: [{ $eq: ['$arah', 'OUT'] }, { $ifNull: ['$qty', 0] }, 0] } },
+        dok: { $sum: 1 },
+        tanggal: { $max: '$tanggal' },
+      },
+    });
+    tahap.push({
+      $project: { _id: 0, kodeBarang: '$_id.kode', hari: '$_id.hari', qtyBertanda: 1, masuk: 1, keluar: 1, dok: 1, tanggal: 1 },
+    });
+    urut = { hari: 1 };
+    urutAkhir = { kodeBarang: 1, __transisi: -1, hari: 1 };
+  } else {
+    urut = { tanggal: 1, urutArah: 1, docId: 1 };
+    urutAkhir = { kodeBarang: 1, __transisi: -1, tanggal: 1, urutArah: 1, docId: 1 };
+  }
+  return tahap.concat([
     {
       $setWindowFields: {
         partitionBy: '$kodeBarang',
@@ -1464,7 +1512,7 @@ function tahapMinus(rentang) {
     },
     { $match: { tanggal: { $gte: rentang.gte }, __saldo: { $lt: -EPS_MUTASI } } },
     { $addFields: { __transisi: { $gte: ['$__sebelum', -EPS_MUTASI] } } },
-    { $sort: { kodeBarang: 1, __transisi: -1, tanggal: 1, urutArah: 1, docId: 1 } },
+    { $sort: urutAkhir },
     {
       $group: {
         _id: '$kodeBarang',
@@ -1472,16 +1520,20 @@ function tahapMinus(rentang) {
         tanggal: { $first: '$tanggal' },
         saldo: { $first: '$__saldo' },
         saldoSebelum: { $first: '$__sebelum' },
+        hari: { $first: '$hari' },
+        masukHari: { $first: '$masuk' },
+        keluarHari: { $first: '$keluar' },
+        dokHari: { $first: '$dok' },
         asal: { $first: '$asal' },
         arah: { $first: '$arah' },
         qty: { $first: '$qty' },
         docId: { $first: '$docId' },
         idAsal: { $first: '$idAsal' },
         saldoMin: { $min: '$__saldo' },
-        barisMinus: { $sum: 1 },
+        jumlahMinus: { $sum: 1 },
       },
     },
-  ];
+  ]);
 }
 
 function _teksKunci(v) {
@@ -1561,6 +1613,7 @@ function tandaiRekap(r, info) {
   if (r.akhir < -EPS_MUTASI) tanda.push('MINUS');
   if (r.awal < -EPS_MUTASI) tanda.push('AWAL_MINUS');
   if (info.minus && r.akhir >= -EPS_MUTASI) tanda.push('PERNAH_MINUS');
+  if (info.minusSesaat && !info.minus && r.akhir >= -EPS_MUTASI) tanda.push('MINUS_SESAAT');
   if (info.cekMaster && !info.master) tanda.push('TIDAK_DI_MASTER');
   if (Object.keys(r.satuan).length > 1) tanda.push('SATUAN_CAMPUR');
   if (r.sebelumCutoff > 0) tanda.push('SEBELUM_CUTOFF');
@@ -1826,10 +1879,17 @@ function _mutasiRekap(config, mapping, ctx, rentang, cutoff, kunci, kodeList, ma
 
   var g = pipelineGabungan(mapping, kunci, _mutasiFilter(config, kodeList));
   var rekap = pivotRekap(jalankanAgregasi(ctx.db, g.koleksi, g.pipeline.concat(tahapRekap(rentang, cutoff))));
-  var barisMinus = jalankanAgregasi(ctx.db, g.koleksi, g.pipeline.concat(tahapMinus(rentang)));
+  var per = config.MINUS_PER;
+  var barisMinus = jalankanAgregasi(ctx.db, g.koleksi, g.pipeline.concat(tahapMinus(rentang, { per: per, tz: ctx.tz })));
   var minus = {};
   var i;
   for (i = 0; i < barisMinus.length; i++) minus[String(barisMinus[i]._id)] = barisMinus[i];
+  var minusTransaksi = {};
+  if (per === 'hari') {
+    var barisTransaksi = jalankanAgregasi(ctx.db, g.koleksi, g.pipeline.concat(tahapMinus(rentang, { per: 'transaksi' })));
+    for (i = 0; i < barisTransaksi.length; i++) minusTransaksi[String(barisTransaksi[i]._id)] = true;
+  }
+  hasil.minusPer = per;
 
   for (i = 0; i < rekap.length; i++) {
     var r = rekap[i];
@@ -1839,20 +1899,25 @@ function _mutasiRekap(config, mapping, ctx, rentang, cutoff, kunci, kodeList, ma
     r.master = m ? { nama: m.nama, kategori: m.kategori, satuan: m.satuan } : null;
     r.minus = infoMinus
       ? {
+        per: per,
         transisi: infoMinus.transisi,
         tanggal: infoMinus.tanggal,
+        hari: infoMinus.hari,
         saldo: bulatkan(infoMinus.saldo),
         saldoSebelum: bulatkan(infoMinus.saldoSebelum),
+        masukHari: infoMinus.masukHari === null || infoMinus.masukHari === undefined ? null : bulatkan(infoMinus.masukHari),
+        keluarHari: infoMinus.keluarHari === null || infoMinus.keluarHari === undefined ? null : bulatkan(infoMinus.keluarHari),
+        dokHari: infoMinus.dokHari,
         asal: infoMinus.asal,
         arah: infoMinus.arah,
         qty: infoMinus.qty,
         docId: infoMinus.docId,
         idAsal: infoMinus.idAsal,
         saldoMin: bulatkan(infoMinus.saldoMin),
-        barisMinus: infoMinus.barisMinus,
+        jumlahMinus: infoMinus.jumlahMinus,
       }
       : null;
-    r.tanda = tandaiRekap(r, { master: m, cekMaster: master.ada, minus: infoMinus });
+    r.tanda = tandaiRekap(r, { master: m, cekMaster: master.ada, minus: infoMinus, minusSesaat: !!minusTransaksi[kunciKode] });
     if (master.ada && !m && typeof r.kodeBarang === 'string') {
       r.kodeMirip = kandidatNama(r.kodeBarang, _mutasiKodeMaster(ctx, mapping, config), 3);
     }
@@ -1952,19 +2017,56 @@ function _mutasiKartuSatuKode(config, mapping, ctx, rentang, cutoff, kunci, kode
   if (terpotong) baris = baris.slice(0, maks);
 
   var saldoAwal = r ? r.awal : 0;
+  var harian = config.MINUS_PER === 'hari';
   var saldo = saldoAwal;
   var minusPertama = null;
   var adaMinus = false;
-  for (var i = 0; i < baris.length; i++) {
-    var sebelum = saldo;
-    saldo = bulatkan(saldo + baris[i].qtyBertanda);
-    baris[i].saldo = saldo;
-    baris[i].saldoSebelum = sebelum;
-    if (saldo < -EPS_MUTASI) {
+  var adaMinusTransaksi = false;
+  var akhirHariSebelum = saldoAwal;
+  var hari = null;
+  var ringkasHari = null;
+  function tutupHari() {
+    if (!ringkasHari) return;
+    var akhir = ringkasHari.barisTerakhir.saldo;
+    ringkasHari.barisTerakhir.akhirHari = true;
+    if (akhir < -EPS_MUTASI) {
       adaMinus = true;
-      if (!minusPertama && sebelum >= -EPS_MUTASI) minusPertama = baris[i];
+      if (!minusPertama && akhirHariSebelum >= -EPS_MUTASI) {
+        minusPertama = {
+          per: 'hari', hari: ringkasHari.hari, tanggal: ringkasHari.barisTerakhir.tanggal, saldoSebelum: akhirHariSebelum,
+          saldo: akhir, masukHari: bulatkan(ringkasHari.masuk), keluarHari: bulatkan(ringkasHari.keluar), dokHari: ringkasHari.dok,
+          baris: ringkasHari.barisTerakhir,
+        };
+      }
+    }
+    akhirHariSebelum = akhir;
+  }
+  for (var i = 0; i < baris.length; i++) {
+    var b0 = baris[i];
+    var sebelum = saldo;
+    saldo = bulatkan(saldo + b0.qtyBertanda);
+    b0.saldo = saldo;
+    b0.saldoSebelum = sebelum;
+    if (saldo < -EPS_MUTASI) adaMinusTransaksi = true;
+    if (harian) {
+      var hariIni = formatLokal(b0.tanggal, ctx.tz, false);
+      if (hariIni !== hari) {
+        tutupHari();
+        hari = hariIni;
+        ringkasHari = { hari: hariIni, masuk: 0, keluar: 0, dok: 0, barisTerakhir: null };
+      }
+      if (b0.arah === 'IN') ringkasHari.masuk += b0.qty || 0;
+      else if (b0.arah === 'OUT') ringkasHari.keluar += b0.qty || 0;
+      ringkasHari.dok++;
+      ringkasHari.barisTerakhir = b0;
+    } else if (saldo < -EPS_MUTASI) {
+      adaMinus = true;
+      if (!minusPertama && sebelum >= -EPS_MUTASI) {
+        minusPertama = { per: 'transaksi', tanggal: b0.tanggal, asal: b0.asal, arah: b0.arah, qty: b0.qty, saldoSebelum: sebelum, saldo: saldo, baris: b0 };
+      }
     }
   }
+  if (harian) tutupHari();
   if (config.CEK_SUMBER) _mutasiCekSumber(ctx, mapping, baris);
 
   var ringkasCek = {};
@@ -1984,6 +2086,7 @@ function _mutasiKartuSatuKode(config, mapping, ctx, rentang, cutoff, kunci, kode
       masuk: b.arah === 'IN' ? b.qty : null,
       keluar: b.arah === 'OUT' ? b.qty : null,
       saldo: b.saldo,
+      akhirHari: b.akhirHari === true,
       satuan: b.satuan,
       docId: b.docId,
       idAsal: b.idAsal,
@@ -1992,7 +2095,7 @@ function _mutasiKartuSatuKode(config, mapping, ctx, rentang, cutoff, kunci, kode
     });
   }
   var m = master.ada ? master.peta[kode.trim()] || null : null;
-  var tanda = r ? tandaiRekap(r, { master: m, cekMaster: master.ada, minus: adaMinus ? true : null }) : [];
+  var tanda = r ? tandaiRekap(r, { master: m, cekMaster: master.ada, minus: adaMinus ? true : null, minusSesaat: harian && adaMinusTransaksi }) : [];
   if (!r && master.ada && !m) tanda.push('TIDAK_DI_MASTER');
   return {
     kodeBarang: kode,
@@ -2005,11 +2108,16 @@ function _mutasiKartuSatuKode(config, mapping, ctx, rentang, cutoff, kunci, kode
     satuan: r ? r.satuan : {},
     jumlahBaris: keluaran.length,
     terpotong: terpotong,
+    minusPer: config.MINUS_PER,
     minusPertama: minusPertama
       ? {
-        tanggal: minusPertama.tanggal, asal: minusPertama.asal, arah: minusPertama.arah, qty: minusPertama.qty,
-        saldoSebelum: minusPertama.saldoSebelum, saldo: minusPertama.saldo, docId: minusPertama.docId,
-        dokSumber: minusPertama.dokSumber || null,
+        per: minusPertama.per, hari: minusPertama.hari || null, tanggal: minusPertama.tanggal,
+        asal: minusPertama.asal || null, arah: minusPertama.arah || null, qty: minusPertama.qty === undefined ? null : minusPertama.qty,
+        masukHari: minusPertama.masukHari === undefined ? null : minusPertama.masukHari,
+        keluarHari: minusPertama.keluarHari === undefined ? null : minusPertama.keluarHari,
+        dokHari: minusPertama.dokHari === undefined ? null : minusPertama.dokHari,
+        saldoSebelum: minusPertama.saldoSebelum, saldo: minusPertama.saldo, docId: minusPertama.baris.docId,
+        dokSumber: minusPertama.baris.dokSumber || null,
       }
       : null,
     minusSejakAwal: saldoAwal < -EPS_MUTASI,
@@ -2047,6 +2155,8 @@ function jalankan(config, mapping, ctx) {
   var mode = String(config.MODE || '').toLowerCase();
   if (mode !== 'rekap' && mode !== 'kartu') throw new Error('CONFIG.MODE harus "rekap" atau "kartu"');
   if (!config.PERIODE) throw new Error('CONFIG.PERIODE wajib diisi');
+  config.MINUS_PER = config.MINUS_PER || 'hari';
+  if (config.MINUS_PER !== 'hari' && config.MINUS_PER !== 'transaksi') throw new Error('CONFIG.MINUS_PER harus "hari" atau "transaksi"');
   var validasi = validasiMapping(mapping);
   if (validasi.error.length) {
     var e = validasi.error[0];
@@ -2073,12 +2183,16 @@ function _mutasiAngka(n) {
 }
 
 function _mutasiSatuan(satuan) {
-  var k = Object.keys(satuan || {});
+  var k = Object.keys(satuan || {}).sort();
   return k.length ? k.join('+') : '';
 }
 
 function _mutasiTeksMinus(m, tz) {
   if (!m) return '';
+  if (m.per === 'hari') {
+    return 'hari ' + m.hari + ' (masuk ' + _mutasiAngka(m.masukHari) + ', keluar ' + _mutasiAngka(m.keluarHari) + ', ' +
+      m.dokHari + ' transaksi) | saldo akhir hari ' + _mutasiAngka(m.saldoSebelum) + ' -> ' + _mutasiAngka(m.saldo);
+  }
   return formatLokal(m.tanggal, tz).slice(0, 16) + ' | ' + m.asal + ' ' + m.arah + ' ' + _mutasiAngka(m.qty) +
     ' | saldo ' + _mutasiAngka(m.saldoSebelum) + ' -> ' + _mutasiAngka(m.saldo);
 }
@@ -2087,7 +2201,11 @@ function _mutasiRenderRekap(h, ctx, config) {
   var baris = [];
   baris.push('Periode : ' + h.periode + ' | companyCode ' + (h.companyCode ? JSON.stringify(h.companyCode) : '(semua)') +
     (h.kategori ? ' | kategori ' + JSON.stringify(h.kategori) : ''));
-  baris.push('Dihitung dari sumber: ' + h.sumberDihitung.join(', ') + (h.cutoff ? ' | cut-off ' + h.cutoff : ''));
+  baris.push('Dihitung dari sumber: ' + h.sumberDihitung.join(', ') + (h.cutoff ? ' | cut-off ' + h.cutoff : '') +
+    ' | minus dinilai per ' + (h.minusPer === 'hari' ? 'akhir hari' : 'transaksi'));
+  if (h.ringkasan.tanda.MINUS_SESAAT) {
+    baris.push('MINUS_SESAAT = saldo sempat minus di tengah hari karena urutan jam input, tetapi saldo akhir harinya tidak minus.');
+  }
   for (var c = 0; c < h.catatan.length; c++) baris.push('Catatan: ' + h.catatan[c]);
   var tanda = [];
   var urutTanda = Object.keys(h.ringkasan.tanda).sort(function (x, y) { return bobotTanda([x]) - bobotTanda([y]) || (x < y ? -1 : 1); });
@@ -2161,14 +2279,16 @@ function _mutasiRenderRekap(h, ctx, config) {
   }
   if (adaMinus.length) {
     baris.push('');
-    baris.push('Penyebab saldo minus di periode ini (transaksi yang mengubah saldo dari >= 0 menjadi minus):');
+    baris.push(h.minusPer === 'hari'
+      ? 'Penyebab saldo minus di periode ini (hari pertama saldo AKHIR HARI berubah dari >= 0 menjadi minus):'
+      : 'Penyebab saldo minus di periode ini (transaksi yang mengubah saldo dari >= 0 menjadi minus):');
     for (var z = 0; z < adaMinus.length; z++) {
       var mi = adaMinus[z].minus;
       var penjelasan = mi.transisi
         ? _mutasiTeksMinus(mi, ctx.tz)
         : 'sudah minus sejak sebelum periode (saldo awal ' + _mutasiAngka(adaMinus[z].awal) + ')';
       baris.push('  ' + adaMinus[z].kodeBarang + ' : ' + penjelasan + ' | terendah ' + _mutasiAngka(mi.saldoMin) +
-        ' (' + mi.barisMinus + ' baris minus)');
+        ' (' + mi.jumlahMinus + (mi.per === 'hari' ? ' hari' : ' baris') + ' minus)');
     }
     baris.push('Telusuri per transaksi dengan MODE: "kartu" dan KODE_BARANG berisi kode di atas.');
   }
@@ -2232,7 +2352,12 @@ function _mutasiRenderKartu(h, ctx) {
     if (k.minusSejakAwal) baris.push('Saldo sudah minus sejak sebelum periode (saldo awal ' + _mutasiAngka(k.saldoAwal) + ').');
     if (k.minusPertama) {
       var ds2 = k.minusPertama.dokSumber || {};
-      baris.push('Saldo berubah jadi minus: ' + _mutasiTeksMinus(k.minusPertama, ctx.tz) + (ds2.noTransaksi ? ' | ' + ds2.noTransaksi : ''));
+      baris.push((k.minusPertama.per === 'hari' ? 'Saldo akhir hari berubah jadi minus: ' : 'Saldo berubah jadi minus: ') +
+        _mutasiTeksMinus(k.minusPertama, ctx.tz) +
+        (ds2.noTransaksi ? (k.minusPertama.per === 'hari' ? ' | transaksi terakhir hari itu ' : ' | ') + ds2.noTransaksi : ''));
+    }
+    if (k.tanda.indexOf('MINUS_SESAAT') >= 0) {
+      baris.push('Catatan: saldo sempat minus di tengah hari (urutan jam input), tetapi saldo akhir harinya tidak minus.');
     }
     var cek = [];
     for (var c in k.ringkasCek) cek.push(c + ' ' + k.ringkasCek[c]);
@@ -2245,5 +2370,5 @@ function render(hasil, ctx, config) {
   return hasil.mode === 'kartu' ? _mutasiRenderKartu(hasil, ctx) : _mutasiRenderRekap(hasil, ctx, config);
 }
 
-return jalankanTool({"nama":"01-mutasi","judul":"Mutasi stok per kode barang: rekap periode (saldo awal, masuk, keluar, saldo akhir) dan kartu stok","versi":"0.4.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
+return jalankanTool({"nama":"01-mutasi","judul":"Mutasi stok per kode barang: rekap periode (saldo awal, masuk, keluar, saldo akhir) dan kartu stok","versi":"0.5.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
 })();

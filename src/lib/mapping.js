@@ -139,8 +139,12 @@ function _validasiOpname(opname, err, warn) {
       err(p, 'harus berupa objek { label, koleksi, field }');
       continue;
     }
-    _kunciAsing(p, o, ['label', 'koleksi', 'field'], warn);
+    _kunciAsing(p, o, ['label', 'koleksi', 'field', 'desimal'], warn);
     if (!_teksIsi(o.koleksi)) err(p + '.koleksi', 'wajib diisi nama koleksi');
+    if (o.desimal !== undefined && o.desimal !== null &&
+        (typeof o.desimal !== 'number' || Math.floor(o.desimal) !== o.desimal || o.desimal < 0 || o.desimal > 6)) {
+      err(p + '.desimal', 'harus bilangan bulat 0-6 (jumlah desimal qty di dokumen opname)');
+    }
     if (!_objekBiasa(o.field)) {
       err(p + '.field', 'wajib berupa objek { kodeBarang, qty, tanggal, ... }');
       continue;

@@ -38,6 +38,7 @@
  *
  * DOKUMEN HITUNG FISIK (opname)
  *   opname.<nama>.field : kodeBarang, qty, tanggal (wajib), companyCode, noReg, noBap, satuan, nama
+ *   opname.<nama>.desimal : (opsional) jumlah desimal qty dokumen; saldo buku dibulatkan sama sebelum dibandingkan
  *   MONSUS = monitoring khusus Bea Cukai, setara hasil opname tahunan.
  */
 module.exports = {
@@ -66,6 +67,8 @@ module.exports = {
     monsus: {
       label: 'Monitoring khusus Bea Cukai (hasil opname)',
       koleksi: 'tbl_monsusdetail',
+      // qty MONSUS dibulatkan 2 desimal (rekon 2026-01: 32 kode beda <= 0,005 karena pembulatan)
+      desimal: 2,
       field: {
         kodeBarang: 'kodeBarang',
         qty: 'qty',

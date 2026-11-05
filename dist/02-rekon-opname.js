@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- *  ERP Trace Mutation | 02-rekon-opname | v0.4.0
+ *  ERP Trace Mutation | 02-rekon-opname | v0.5.0
  *  Rekonsiliasi saldo buku (ledger) dengan dokumen hitung fisik (MONSUS / stock opname) per kode barang
  * ----------------------------------------------------------------------------
  *  FILE HASIL BUILD. Yang boleh diedit hanya blok KONFIGURASI di bawah.
@@ -33,6 +33,10 @@ var CONFIG = {
   // Tanggal saldo buku (YYYY-MM-DD, zona waktu MAPPING). Saldo dihitung s/d akhir hari tanggal ini.
   // null = tanggal dari dokumen opname (harus satu tanggal)
   TANGGAL: null,
+
+  // Transaksi sebelum tanggal ini TIDAK dihitung (saldo buku dianggap 0 pada tanggal ini).
+  // null = seluruh histori. Contoh: '2025-01-01' untuk meniru periode monitoring MONSUS (tanggalAwal header).
+  TANGGAL_AWAL: null,
 
   // Filter companyCode. null = semua company
   COMPANY_CODE: 'WAG',
@@ -97,6 +101,7 @@ var CONFIG = {
  *
  * DOKUMEN HITUNG FISIK (opname)
  *   opname.<nama>.field : kodeBarang, qty, tanggal (wajib), companyCode, noReg, noBap, satuan, nama
+ *   opname.<nama>.desimal : (opsional) jumlah desimal qty dokumen; saldo buku dibulatkan sama sebelum dibandingkan
  *   MONSUS = monitoring khusus Bea Cukai, setara hasil opname tahunan.
  */
 var MAPPING = {
@@ -125,6 +130,8 @@ var MAPPING = {
     monsus: {
       label: 'Monitoring khusus Bea Cukai (hasil opname)',
       koleksi: 'tbl_monsusdetail',
+      // qty MONSUS dibulatkan 2 desimal (rekon 2026-01: 32 kode beda <= 0,005 karena pembulatan)
+      desimal: 2,
       field: {
         kodeBarang: 'kodeBarang',
         qty: 'qty',
@@ -929,8 +936,12 @@ function _validasiOpname(opname, err, warn) {
       err(p, 'harus berupa objek { label, koleksi, field }');
       continue;
     }
-    _kunciAsing(p, o, ['label', 'koleksi', 'field'], warn);
+    _kunciAsing(p, o, ['label', 'koleksi', 'field', 'desimal'], warn);
     if (!_teksIsi(o.koleksi)) err(p + '.koleksi', 'wajib diisi nama koleksi');
+    if (o.desimal !== undefined && o.desimal !== null &&
+        (typeof o.desimal !== 'number' || Math.floor(o.desimal) !== o.desimal || o.desimal < 0 || o.desimal > 6)) {
+      err(p + '.desimal', 'harus bilangan bulat 0-6 (jumlah desimal qty di dokumen opname)');
+    }
     if (!_objekBiasa(o.field)) {
       err(p + '.field', 'wajib berupa objek { kodeBarang, qty, tanggal, ... }');
       continue;
@@ -1349,11 +1360,17 @@ function filterDiHeader(sumber, filterLogis) {
 var EPS_MUTASI = 1e-6;
 var URUTAN_TANDA = [
   'MINUS', 'AWAL_MINUS', 'PERNAH_MINUS', 'TIDAK_DI_MASTER', 'SATUAN_CAMPUR', 'SEBELUM_CUTOFF',
-  'ARAH_TIDAK_DIKENAL', 'QTY_KOSONG', 'TANPA_TANGGAL',
+  'MINUS_SESAAT', 'ARAH_TIDAK_DIKENAL', 'QTY_KOSONG', 'TANPA_TANGGAL',
 ];
 
 function bulatkan(n) {
   return Math.round(n * 1e6) / 1e6;
+}
+
+/** Bulatkan ke d desimal (setengah ke atas), tahan galat floating point: 1,235 -> 1,24 */
+function bulatkanDesimal(n, d) {
+  var f = Math.pow(10, d);
+  return Math.round(parseFloat((n * f).toFixed(8))) / f;
 }
 
 /** Nama sumber yang ikut dihitung (hitungMutasi bukan false), sesuai urutan di MAPPING */
@@ -1435,16 +1452,46 @@ function tahapRekap(rentang, cutoff) {
 
 /**
  * Tahap agregasi saldo berjalan per kode ($setWindowFields + $shift, MongoDB 5.0+).
- * Hasil hanya untuk kode yang saldonya minus di salah satu baris DI DALAM periode:
- *   transisi = true  -> baris pertama di periode yang membuat saldo berubah dari >= 0 menjadi minus
- *   transisi = false -> tidak ada transisi di periode: saldo sudah minus sejak sebelum periode;
- *                       baris yang dikembalikan = baris minus pertama di periode
- *   + saldoMin, barisMinus (jumlah baris dengan saldo minus di periode)
+ *   opsi.per = 'hari'      -> saldo dinilai per AKHIR HARI (zona waktu opsi.tz). Minus sesaat di tengah hari
+ *                             karena urutan jam input tidak dihitung.
+ *   opsi.per = 'transaksi' -> saldo dinilai setelah setiap transaksi.
+ * Hasil hanya untuk kode yang saldonya minus di periode:
+ *   transisi = true  -> titik pertama di periode saat saldo berubah dari >= 0 menjadi minus
+ *   transisi = false -> saldo sudah minus sejak sebelum periode (tidak ada transisi di periode)
+ *   + saldoSebelum, saldo, saldoMin, jumlahMinus (jumlah hari/transaksi dengan saldo minus di periode)
+ *   per hari      : hari, masukHari, keluarHari, dokHari
+ *   per transaksi : asal, arah, qty, docId, idAsal
  */
-function tahapMinus(rentang) {
-  var urut = { tanggal: 1, urutArah: 1, docId: 1 };
-  return [
-    { $match: { tanggalTipe: 'date', tanggal: { $lt: rentang.lt } } },
+function tahapMinus(rentang, opsi) {
+  opsi = opsi || {};
+  var harian = opsi.per === 'hari';
+  var tahap = [{ $match: { tanggalTipe: 'date', tanggal: { $lt: rentang.lt } } }];
+  var urut;
+  var urutAkhir;
+  if (harian) {
+    tahap.push({
+      $group: {
+        _id: {
+          kode: '$kodeBarang',
+          hari: { $dateToString: { format: '%Y-%m-%d', date: '$tanggal', timezone: opsi.tz || TZ_DEFAULT } },
+        },
+        qtyBertanda: { $sum: '$qtyBertanda' },
+        masuk: { $sum: { $cond: [{ $eq: ['$arah', 'IN'] }, { $ifNull: ['$qty', 0] }, 0] } },
+        keluar: { $sum: { $cond: [{ $eq: ['$arah', 'OUT'] }, { $ifNull: ['$qty', 0] }, 0] } },
+        dok: { $sum: 1 },
+        tanggal: { $max: '$tanggal' },
+      },
+    });
+    tahap.push({
+      $project: { _id: 0, kodeBarang: '$_id.kode', hari: '$_id.hari', qtyBertanda: 1, masuk: 1, keluar: 1, dok: 1, tanggal: 1 },
+    });
+    urut = { hari: 1 };
+    urutAkhir = { kodeBarang: 1, __transisi: -1, hari: 1 };
+  } else {
+    urut = { tanggal: 1, urutArah: 1, docId: 1 };
+    urutAkhir = { kodeBarang: 1, __transisi: -1, tanggal: 1, urutArah: 1, docId: 1 };
+  }
+  return tahap.concat([
     {
       $setWindowFields: {
         partitionBy: '$kodeBarang',
@@ -1461,7 +1508,7 @@ function tahapMinus(rentang) {
     },
     { $match: { tanggal: { $gte: rentang.gte }, __saldo: { $lt: -EPS_MUTASI } } },
     { $addFields: { __transisi: { $gte: ['$__sebelum', -EPS_MUTASI] } } },
-    { $sort: { kodeBarang: 1, __transisi: -1, tanggal: 1, urutArah: 1, docId: 1 } },
+    { $sort: urutAkhir },
     {
       $group: {
         _id: '$kodeBarang',
@@ -1469,16 +1516,20 @@ function tahapMinus(rentang) {
         tanggal: { $first: '$tanggal' },
         saldo: { $first: '$__saldo' },
         saldoSebelum: { $first: '$__sebelum' },
+        hari: { $first: '$hari' },
+        masukHari: { $first: '$masuk' },
+        keluarHari: { $first: '$keluar' },
+        dokHari: { $first: '$dok' },
         asal: { $first: '$asal' },
         arah: { $first: '$arah' },
         qty: { $first: '$qty' },
         docId: { $first: '$docId' },
         idAsal: { $first: '$idAsal' },
         saldoMin: { $min: '$__saldo' },
-        barisMinus: { $sum: 1 },
+        jumlahMinus: { $sum: 1 },
       },
     },
-  ];
+  ]);
 }
 
 function _teksKunci(v) {
@@ -1558,6 +1609,7 @@ function tandaiRekap(r, info) {
   if (r.akhir < -EPS_MUTASI) tanda.push('MINUS');
   if (r.awal < -EPS_MUTASI) tanda.push('AWAL_MINUS');
   if (info.minus && r.akhir >= -EPS_MUTASI) tanda.push('PERNAH_MINUS');
+  if (info.minusSesaat && !info.minus && r.akhir >= -EPS_MUTASI) tanda.push('MINUS_SESAAT');
   if (info.cekMaster && !info.master) tanda.push('TIDAK_DI_MASTER');
   if (Object.keys(r.satuan).length > 1) tanda.push('SATUAN_CAMPUR');
   if (r.sebelumCutoff > 0) tanda.push('SEBELUM_CUTOFF');
@@ -1831,10 +1883,12 @@ function _rekonTanggalOpname(barisOpname, tz) {
   return Object.keys(tanggal).sort();
 }
 
-function _rekonBuku(d, mapping, config, batas, kodeKategori) {
+function _rekonBuku(d, mapping, config, batas, batasAwal, kodeKategori) {
   var g = pipelineGabungan(mapping, sumberDihitung(mapping), { companyCode: config.COMPANY_CODE || null, kodeBarang: kodeKategori });
+  var rentangTanggal = { $lt: batas };
+  if (batasAwal) rentangTanggal.$gte = batasAwal;
   return jalankanAgregasi(d, g.koleksi, g.pipeline.concat([
-    { $match: { tanggalTipe: 'date', tanggal: { $lt: batas } } },
+    { $match: { tanggalTipe: 'date', tanggal: rentangTanggal } },
     {
       $group: {
         _id: '$kodeBarang',
@@ -1892,7 +1946,10 @@ function jalankan(config, mapping, ctx) {
     tanggal = daftarTanggal[0];
   }
   var batas = awalHariLokal(geserHari(tanggal, 1), ctx.tz);
-  var barisBuku = _rekonBuku(ctx.db, mapping, config, batas, kodeKategori);
+  var batasAwal = config.TANGGAL_AWAL ? awalHariLokal(String(config.TANGGAL_AWAL), ctx.tz) : null;
+  if (batasAwal && batasAwal >= batas) throw new Error('CONFIG.TANGGAL_AWAL harus sebelum tanggal saldo (' + tanggal + ')');
+  var desimal = def.desimal === undefined || def.desimal === null ? null : Number(def.desimal);
+  var barisBuku = _rekonBuku(ctx.db, mapping, config, batas, batasAwal, kodeKategori);
 
   var perKode = {};
   var i;
@@ -1915,11 +1972,13 @@ function jalankan(config, mapping, ctx) {
     var kb = b._id === null || b._id === undefined ? '(kosong)' : String(b._id);
     var r = perKode[kb];
     if (!r) {
-      if (Math.abs(b.saldo) <= toleransi) continue; // saldo nol & tidak ada di opname: tidak relevan
+      var saldoBanding = desimal === null ? b.saldo : bulatkanDesimal(b.saldo, desimal);
+      if (Math.abs(saldoBanding) <= toleransi) continue; // saldo nol & tidak ada di opname: tidak relevan
       r = { kodeBarang: b._id === undefined ? null : b._id, fisik: null, barisOpname: 0, qtyOpnameKosong: 0, satuanOpname: [], namaOpname: null };
       perKode[kb] = r;
     }
-    r.buku = bulatkan(b.saldo);
+    r.bukuAsli = bulatkan(b.saldo);
+    r.buku = desimal === null ? r.bukuAsli : bulatkanDesimal(b.saldo, desimal);
     r.satuanBuku = _rekonSatuan(b.satuan);
     r.dokBuku = b.dok;
   }
@@ -1966,6 +2025,8 @@ function jalankan(config, mapping, ctx) {
     companyCode: config.COMPANY_CODE || null,
     kategori: config.KATEGORI || null,
     toleransi: toleransi,
+    desimal: desimal,
+    tanggalAwal: config.TANGGAL_AWAL || null,
     sumberDihitung: sumberDihitung(mapping),
     ringkasan: ringkasan,
     kode: hasil,
@@ -1977,8 +2038,9 @@ function render(h, ctx, config) {
   var baris = [];
   baris.push('Opname : ' + h.labelOpname + ' | noReg ' + (h.noReg || '(semua)') + (h.noBap ? ' | BAP ' + h.noBap : '') +
     ' | companyCode ' + (h.companyCode ? JSON.stringify(h.companyCode) : '(semua)') + (h.kategori ? ' | kategori ' + JSON.stringify(h.kategori) : ''));
-  baris.push('Saldo buku: ' + h.sumberDihitung.join(', ') + ' s/d akhir ' + h.tanggal + ' ' + labelZona(ctx.tz) +
-    ' (transaksi < ' + formatLokal(h.batasBuku, ctx.tz) + ') | toleransi ' + h.toleransi);
+  baris.push('Saldo buku: ' + h.sumberDihitung.join(', ') + (h.tanggalAwal ? ' dari ' + h.tanggalAwal : ' (seluruh histori)') +
+    ' s/d akhir ' + h.tanggal + ' ' + labelZona(ctx.tz) + ' (transaksi < ' + formatLokal(h.batasBuku, ctx.tz) + ')' +
+    ' | toleransi ' + h.toleransi + (h.desimal !== null ? ' | buku dibulatkan ' + h.desimal + ' desimal mengikuti dokumen opname' : ''));
   for (var c = 0; c < h.catatan.length; c++) baris.push('Catatan: ' + h.catatan[c]);
   var status = [];
   for (var s = 0; s < REKON_STATUS.length; s++) {
@@ -2031,5 +2093,5 @@ function render(h, ctx, config) {
   return baris;
 }
 
-return jalankanTool({"nama":"02-rekon-opname","judul":"Rekonsiliasi saldo buku (ledger) dengan dokumen hitung fisik (MONSUS / stock opname) per kode barang","versi":"0.4.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
+return jalankanTool({"nama":"02-rekon-opname","judul":"Rekonsiliasi saldo buku (ledger) dengan dokumen hitung fisik (MONSUS / stock opname) per kode barang","versi":"0.5.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
 })();

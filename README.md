@@ -23,7 +23,7 @@ Saldo dihitung dengan model `Saldo Akhir = Saldo Awal + Pemasukan − Pengeluara
 
 ## Status
 
-Versi **0.4.0**: Fase 1 selesai, rekonsiliasi dengan hasil opname tersedia.
+Versi **0.5.0**: Fase 1 selesai, rekonsiliasi dengan hasil opname tersedia, deteksi minus per akhir hari.
 
 | Fase | Isi | Status |
 |---|---|---|
@@ -245,7 +245,7 @@ Menghitung mutasi dari sumber yang `hitungMutasi`-nya tidak `false` (untuk `erpg
 - **Saldo awal** adalah akumulasi semua transaksi **sebelum** periode. Tidak ada tabel saldo awal terpisah. Cut-off 18 Agustus 2025 (stock opname mesin) sudah tercatat sebagai transaksi INCOMING `SALDO AWAL`.
 - **Masuk/keluar** adalah transaksi **di dalam** periode, dengan batas WIB dan batas atas eksklusif.
 
-**Mode `rekap`:** satu baris per kode barang berisi saldo awal, masuk, keluar, saldo akhir, satuan, dan tanda masalah. Disertai mutasi per asal (INCOMING, MATERIALOUT, DELIVERY, …). Untuk kode yang saldonya minus di periode, ditampilkan **transaksi yang mengubah saldo dari ≥ 0 menjadi minus** (saldo berjalan per kode). Kalau saldo sudah minus sejak sebelum periode dan tidak pernah kembali ≥ 0, itu yang dilaporkan. Untuk kode yang tidak ada di master, ditampilkan **kode mirip di master** (kemungkinan salah ketik).
+**Mode `rekap`:** satu baris per kode barang berisi saldo awal, masuk, keluar, saldo akhir, satuan, dan tanda masalah. Disertai mutasi per asal (INCOMING, MATERIALOUT, DELIVERY, …). Untuk kode yang saldonya minus di periode, ditampilkan **titik saat saldo berubah dari ≥ 0 menjadi minus**. Bawaannya dinilai per **saldo akhir hari** (`MINUS_PER: 'hari'`). Minus yang hanya sesaat di tengah hari karena urutan jam input (misalnya material keluar 12:14, GRN baru 12:15) diberi tanda terpisah `MINUS_SESAAT`. Kalau saldo sudah minus sejak sebelum periode dan tidak pernah kembali ≥ 0, itu yang dilaporkan. Untuk kode yang tidak ada di master, ditampilkan **kode mirip di master** (kemungkinan salah ketik).
 
 **Mode `kartu`:** semua transaksi satu atau beberapa kode (maks 20) dengan saldo berjalan. Setiap baris ledger dicocokkan ke dokumen sumbernya lewat `idAsal` (`CEK_SUMBER`), dan ditampilkan nomor transaksinya (GRN…/OUTWH…/OUT…/PRD…/TRF…) serta jenis dokumen BC.
 
@@ -257,6 +257,7 @@ Menghitung mutasi dari sumber yang `hitungMutasi`-nya tidak `false` (untuk `erpg
 | `KODE_BARANG` | `null` | `'ABC'` atau `['ABC', 'DEF']`. Wajib untuk mode `kartu` |
 | `KATEGORI` | `null` | Rekap per kategori master (`jenisBc`): `'MATERIAL'`, `'BARANG SETENGAH JADI'`, `'BARANG JADI'`, `'MESIN'`, `'SCRAP'` |
 | `TANGGAL_CUTOFF` | `'2025-08-18'` | Transaksi sebelum tanggal ini diberi tanda `SEBELUM_CUTOFF` (tetap dihitung) |
+| `MINUS_PER` | `'hari'` | `'hari'` = saldo dinilai di akhir hari; `'transaksi'` = setelah setiap transaksi |
 | `HANYA_BERMASALAH` | `false` | Rekap: tampilkan hanya kode yang punya tanda |
 | `TAMPIL_MAKS` | `200` | Rekap: baris maksimal di output teks (`FORMAT: 'json'` selalu lengkap) |
 | `KARTU_MAKS_BARIS` | `2000` | Kartu: baris maksimal per kode |
@@ -272,6 +273,7 @@ Tanda di rekap (urut dari yang paling berat):
 | `TIDAK_DI_MASTER` | Kode tidak ada di master barang (`tbl_barang`) untuk companyCode tersebut |
 | `SATUAN_CAMPUR` | Baris kode ini memakai lebih dari satu satuan. Qty dijumlah apa adanya **tanpa konversi** |
 | `SEBELUM_CUTOFF` | Ada transaksi bertanggal sebelum `TANGGAL_CUTOFF` |
+| `MINUS_SESAAT` | (mode `hari`) Saldo sempat minus di tengah hari karena urutan jam input, tetapi saldo akhir harinya tidak minus |
 | `ARAH_TIDAK_DIKENAL`, `QTY_KOSONG`, `TANPA_TANGGAL` | Arah, qty, atau tanggal baris tidak terbaca (tidak ikut saldo) |
 
 Kolom CEK di kartu stok:
@@ -299,9 +301,9 @@ KODE     NAMA    KATEGORI     SAT  SALDO AWAL  MASUK  KELUAR  SALDO AKHIR  TANDA
 FG-001   KAOS    BARANG JADI  PCE           0    500     510          -10  MINUS
 MAT-001  KAIN A  MATERIAL     YRD         100     60     145           15  PERNAH_MINUS
 
-Penyebab saldo minus di periode ini (transaksi yang mengubah saldo dari >= 0 menjadi minus):
-  FG-001 : 2026-01-20 12:00 | DELIVERY OUT 10 | saldo 0 -> -10 | terendah -10 (1 baris minus)
-  MAT-001 : 2026-01-10 09:00 | MATERIALOUT OUT 50 | saldo 20 -> -30 | terendah -30 (1 baris minus)
+Penyebab saldo minus di periode ini (hari pertama saldo AKHIR HARI berubah dari >= 0 menjadi minus):
+  FG-001 : hari 2026-01-20 (masuk 0, keluar 10, 1 transaksi) | saldo akhir hari 0 -> -10 | terendah -10 (1 hari minus)
+  MAT-001 : hari 2026-01-10 (masuk 0, keluar 50, 1 transaksi) | saldo akhir hari 20 -> -30 | terendah -30 (1 hari minus)
 Telusuri per transaksi dengan MODE: "kartu" dan KODE_BARANG berisi kode di atas.
 ```
 
@@ -319,7 +321,7 @@ TANGGAL (WIB)     ASAL        PROSES       NO. TRANSAKSI                 DOK    
 2026-01-18 12:00  DELIVERY                                                                 30      0  PCE  SUMBER_HILANG
 2026-01-20 12:00  DELIVERY                 OUT20260125-00001             BC 30             10    -10  PCE  TANGGAL_BEDA
 Saldo akhir: -10 (masuk 500, keluar 510, 6 transaksi)
-Saldo berubah jadi minus: 2026-01-20 12:00 | DELIVERY OUT 10 | saldo 0 -> -10 | OUT20260125-00001
+Saldo akhir hari berubah jadi minus: hari 2026-01-20 (masuk 0, keluar 10, 1 transaksi) | saldo akhir hari 0 -> -10 | transaksi terakhir hari itu OUT20260125-00001
 Cek sumber: OK 2 | SUMBER_DIHAPUS 1 | QTY_BEDA 1 | SUMBER_HILANG 1 | TANGGAL_BEDA 1
 ```
 
@@ -332,12 +334,15 @@ Membandingkan **saldo buku** (dari sumber yang dihitung, untuk `erpgarment`: led
 
 Selisih = fisik − buku. Positif berarti fisik lebih banyak dari buku; negatif berarti buku lebih banyak dari fisik.
 
+Kalau `MAPPING.opname.<nama>.desimal` diisi (MONSUS: `2`), saldo buku dibulatkan ke jumlah desimal yang sama sebelum dibandingkan. Nilai buku asli tetap ada di JSON (`bukuAsli`).
+
 | CONFIG | Default | Keterangan |
 |---|---|---|
 | `OPNAME` | `'monsus'` | Nama dokumen di `MAPPING.opname` |
 | `NO_REG` | `'MONSUS20260131-00001'` | Nomor registrasi dokumen. Sebaiknya diisi supaya tidak mencampur beberapa dokumen |
 | `NO_BAP` | `'BAP-03'` | Nomor BAP (opsional); satu noReg bisa berisi beberapa BAP |
 | `TANGGAL` | `null` | Tanggal saldo buku (`YYYY-MM-DD`). `null` = tanggal dokumen opname (harus satu tanggal) |
+| `TANGGAL_AWAL` | `null` | Transaksi sebelum tanggal ini tidak dihitung (saldo dianggap 0 pada tanggal itu). Contoh `'2025-01-01'` untuk meniru periode monitoring MONSUS (`tanggalAwal` di header) |
 | `COMPANY_CODE` | `'WAG'` | Filter companyCode |
 | `KATEGORI` | `null` | Batasi **kedua sisi** ke kategori master, mis. `'MATERIAL'` |
 | `TOLERANSI` | `0.0001` | Selisih absolut di bawah ini dianggap cocok |
@@ -357,19 +362,19 @@ Contoh (data dummy dari test):
 
 ```text
 Opname : Monitoring khusus Bea Cukai (hasil opname) | noReg MONSUS20260131-00001 | BAP BAP-03 | companyCode "WAG"
-Saldo buku: stok s/d akhir 2026-01-31 WIB (transaksi < 2026-02-01 00:00:00) | toleransi 0.0001
-Ringkasan: 12 kode | SELISIH 3 | HANYA_BUKU 7 | HANYA_OPNAME 1 | COCOK 1
+Saldo buku: stok (seluruh histori) s/d akhir 2026-01-31 WIB (transaksi < 2026-02-01 00:00:00) | toleransi 0.0001 | buku dibulatkan 2 desimal mengikuti dokumen opname
+Ringkasan: 13 kode | SELISIH 4 | HANYA_BUKU 6 | HANYA_OPNAME 1 | COCOK 2
 
 KODE        NAMA                KATEGORI              SAT     BUKU  FISIK  SELISIH  STATUS        TANDA
 ----------  ------------------  --------------------  ------  ----  -----  -------  ------------  --------------------------
+CT-001      CUTTING KAOS        BARANG SETENGAH JADI  PCE       50    150      100  SELISIH
 MAT-002     KAIN B              MATERIAL              YRD      -15      0       15  SELISIH       BUKU_MINUS
-FG-001      KAOS                BARANG JADI           PCE      -10      0       10  SELISIH       BUKU_MINUS
 MAT-003     BENANG              MATERIAL              CJ+MTR   998    990       -8  SELISIH       SATUAN_CAMPUR,OPNAME_GANDA
 S001        POTONGAN KAIN SISA  SCRAP                 KGM      455      -     -455  HANYA_BUKU
 OPN-ONLY    OPNAME OPN-ONLY                                      -      5        5  HANYA_OPNAME  TIDAK_DI_MASTER
 ```
 
-(potongan; baris HANYA_BUKU lain tidak ditampilkan di sini)
+(potongan; baris lain tidak ditampilkan di sini. Dengan `TANGGAL_AWAL: '2025-01-01'`, `CT-001` menjadi COCOK karena transaksi bertanggal 2024 tidak dihitung.)
 
 ---
 
@@ -403,7 +408,7 @@ sumber: {
 - **Field logis wajib:** `tanggal`, `companyCode`, `kodeBarang`, `qty`
 - **Field logis opsional:** `noTransaksi`, `idAsal`, `idDokumen`, `noAju`, `noReg`, `noUrut`, `jenisDokumen`, `satuan`, `gudang`, `createdAt`, `asal`, `proses`, `dihapus`
 - **`rujukan`:** baris dengan `asal` X dicari dokumen sumbernya di sumber `rujukan[X]` lewat `_id = idAsal`. Kunci `'ASAL:ARAH'` (mis. `'DEADSTOK:OUT'`) didahulukan dari `'ASAL'`.
-- **`opname`:** dokumen hitung fisik untuk `02-rekon-opname`, `{ nama: { label, koleksi, field: { kodeBarang, qty, tanggal, companyCode, noReg, noBap, satuan, nama } } }`.
+- **`opname`:** dokumen hitung fisik untuk `02-rekon-opname`, `{ nama: { label, koleksi, desimal, field: { kodeBarang, qty, tanggal, companyCode, noReg, noBap, satuan, nama } } }`.
 - **Arah dari field** dibandingkan setelah trim + huruf besar. Sumber yang field-nya ada di koleksi header bisa memakai `header: { koleksi, localField, foreignField, konversi, field }`.
 
 **Periode selalu dihitung dalam WIB** (`timezone: '+07:00'`) dengan batas atas eksklusif. Contoh November 2026:

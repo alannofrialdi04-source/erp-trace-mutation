@@ -18,6 +18,10 @@ var CONFIG = {
   // null = tanggal dari dokumen opname (harus satu tanggal)
   TANGGAL: null,
 
+  // Transaksi sebelum tanggal ini TIDAK dihitung (saldo buku dianggap 0 pada tanggal ini).
+  // null = seluruh histori. Contoh: '2025-01-01' untuk meniru periode monitoring MONSUS (tanggalAwal header).
+  TANGGAL_AWAL: null,
+
   // Filter companyCode. null = semua company
   COMPANY_CODE: 'WAG',
 
@@ -96,10 +100,12 @@ function _rekonTanggalOpname(barisOpname, tz) {
   return Object.keys(tanggal).sort();
 }
 
-function _rekonBuku(d, mapping, config, batas, kodeKategori) {
+function _rekonBuku(d, mapping, config, batas, batasAwal, kodeKategori) {
   var g = pipelineGabungan(mapping, sumberDihitung(mapping), { companyCode: config.COMPANY_CODE || null, kodeBarang: kodeKategori });
+  var rentangTanggal = { $lt: batas };
+  if (batasAwal) rentangTanggal.$gte = batasAwal;
   return jalankanAgregasi(d, g.koleksi, g.pipeline.concat([
-    { $match: { tanggalTipe: 'date', tanggal: { $lt: batas } } },
+    { $match: { tanggalTipe: 'date', tanggal: rentangTanggal } },
     {
       $group: {
         _id: '$kodeBarang',
@@ -157,7 +163,10 @@ function jalankan(config, mapping, ctx) {
     tanggal = daftarTanggal[0];
   }
   var batas = awalHariLokal(geserHari(tanggal, 1), ctx.tz);
-  var barisBuku = _rekonBuku(ctx.db, mapping, config, batas, kodeKategori);
+  var batasAwal = config.TANGGAL_AWAL ? awalHariLokal(String(config.TANGGAL_AWAL), ctx.tz) : null;
+  if (batasAwal && batasAwal >= batas) throw new Error('CONFIG.TANGGAL_AWAL harus sebelum tanggal saldo (' + tanggal + ')');
+  var desimal = def.desimal === undefined || def.desimal === null ? null : Number(def.desimal);
+  var barisBuku = _rekonBuku(ctx.db, mapping, config, batas, batasAwal, kodeKategori);
 
   var perKode = {};
   var i;
@@ -180,11 +189,13 @@ function jalankan(config, mapping, ctx) {
     var kb = b._id === null || b._id === undefined ? '(kosong)' : String(b._id);
     var r = perKode[kb];
     if (!r) {
-      if (Math.abs(b.saldo) <= toleransi) continue; // saldo nol & tidak ada di opname: tidak relevan
+      var saldoBanding = desimal === null ? b.saldo : bulatkanDesimal(b.saldo, desimal);
+      if (Math.abs(saldoBanding) <= toleransi) continue; // saldo nol & tidak ada di opname: tidak relevan
       r = { kodeBarang: b._id === undefined ? null : b._id, fisik: null, barisOpname: 0, qtyOpnameKosong: 0, satuanOpname: [], namaOpname: null };
       perKode[kb] = r;
     }
-    r.buku = bulatkan(b.saldo);
+    r.bukuAsli = bulatkan(b.saldo);
+    r.buku = desimal === null ? r.bukuAsli : bulatkanDesimal(b.saldo, desimal);
     r.satuanBuku = _rekonSatuan(b.satuan);
     r.dokBuku = b.dok;
   }
@@ -231,6 +242,8 @@ function jalankan(config, mapping, ctx) {
     companyCode: config.COMPANY_CODE || null,
     kategori: config.KATEGORI || null,
     toleransi: toleransi,
+    desimal: desimal,
+    tanggalAwal: config.TANGGAL_AWAL || null,
     sumberDihitung: sumberDihitung(mapping),
     ringkasan: ringkasan,
     kode: hasil,
@@ -242,8 +255,9 @@ function render(h, ctx, config) {
   var baris = [];
   baris.push('Opname : ' + h.labelOpname + ' | noReg ' + (h.noReg || '(semua)') + (h.noBap ? ' | BAP ' + h.noBap : '') +
     ' | companyCode ' + (h.companyCode ? JSON.stringify(h.companyCode) : '(semua)') + (h.kategori ? ' | kategori ' + JSON.stringify(h.kategori) : ''));
-  baris.push('Saldo buku: ' + h.sumberDihitung.join(', ') + ' s/d akhir ' + h.tanggal + ' ' + labelZona(ctx.tz) +
-    ' (transaksi < ' + formatLokal(h.batasBuku, ctx.tz) + ') | toleransi ' + h.toleransi);
+  baris.push('Saldo buku: ' + h.sumberDihitung.join(', ') + (h.tanggalAwal ? ' dari ' + h.tanggalAwal : ' (seluruh histori)') +
+    ' s/d akhir ' + h.tanggal + ' ' + labelZona(ctx.tz) + ' (transaksi < ' + formatLokal(h.batasBuku, ctx.tz) + ')' +
+    ' | toleransi ' + h.toleransi + (h.desimal !== null ? ' | buku dibulatkan ' + h.desimal + ' desimal mengikuti dokumen opname' : ''));
   for (var c = 0; c < h.catatan.length; c++) baris.push('Catatan: ' + h.catatan[c]);
   var status = [];
   for (var s = 0; s < REKON_STATUS.length; s++) {

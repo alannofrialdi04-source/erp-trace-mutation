@@ -61,6 +61,9 @@ test('opname: kodeBarang/qty/tanggal wajib', () => {
   const m2 = salin(require('../../config/mapping'));
   m2.opname = {};
   assert.deepEqual(pathError(validasiMapping(m2)), ['opname']);
+  const m3 = salin(require('../../config/mapping'));
+  m3.opname.monsus.desimal = 2.5;
+  assert.deepEqual(pathError(validasiMapping(m3)), ['opname.monsus.desimal']);
 });
 
 test('sumberRujukan: kunci ASAL:ARAH didahulukan', () => {

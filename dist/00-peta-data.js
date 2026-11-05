@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- *  ERP Trace Mutation | 00-peta-data | v0.4.0
+ *  ERP Trace Mutation | 00-peta-data | v0.5.0
  *  Peta data: distribusi nilai kunci (status, arah, proses, satuan) dan relasi id antar koleksi
  * ----------------------------------------------------------------------------
  *  FILE HASIL BUILD. Yang boleh diedit hanya blok KONFIGURASI di bawah.
@@ -191,6 +191,7 @@ var CONFIG = {
  *
  * DOKUMEN HITUNG FISIK (opname)
  *   opname.<nama>.field : kodeBarang, qty, tanggal (wajib), companyCode, noReg, noBap, satuan, nama
+ *   opname.<nama>.desimal : (opsional) jumlah desimal qty dokumen; saldo buku dibulatkan sama sebelum dibandingkan
  *   MONSUS = monitoring khusus Bea Cukai, setara hasil opname tahunan.
  */
 var MAPPING = {
@@ -219,6 +220,8 @@ var MAPPING = {
     monsus: {
       label: 'Monitoring khusus Bea Cukai (hasil opname)',
       koleksi: 'tbl_monsusdetail',
+      // qty MONSUS dibulatkan 2 desimal (rekon 2026-01: 32 kode beda <= 0,005 karena pembulatan)
+      desimal: 2,
       field: {
         kodeBarang: 'kodeBarang',
         qty: 'qty',
@@ -1023,8 +1026,12 @@ function _validasiOpname(opname, err, warn) {
       err(p, 'harus berupa objek { label, koleksi, field }');
       continue;
     }
-    _kunciAsing(p, o, ['label', 'koleksi', 'field'], warn);
+    _kunciAsing(p, o, ['label', 'koleksi', 'field', 'desimal'], warn);
     if (!_teksIsi(o.koleksi)) err(p + '.koleksi', 'wajib diisi nama koleksi');
+    if (o.desimal !== undefined && o.desimal !== null &&
+        (typeof o.desimal !== 'number' || Math.floor(o.desimal) !== o.desimal || o.desimal < 0 || o.desimal > 6)) {
+      err(p + '.desimal', 'harus bilangan bulat 0-6 (jumlah desimal qty di dokumen opname)');
+    }
     if (!_objekBiasa(o.field)) {
       err(p + '.field', 'wajib berupa objek { kodeBarang, qty, tanggal, ... }');
       continue;
@@ -1443,11 +1450,17 @@ function filterDiHeader(sumber, filterLogis) {
 var EPS_MUTASI = 1e-6;
 var URUTAN_TANDA = [
   'MINUS', 'AWAL_MINUS', 'PERNAH_MINUS', 'TIDAK_DI_MASTER', 'SATUAN_CAMPUR', 'SEBELUM_CUTOFF',
-  'ARAH_TIDAK_DIKENAL', 'QTY_KOSONG', 'TANPA_TANGGAL',
+  'MINUS_SESAAT', 'ARAH_TIDAK_DIKENAL', 'QTY_KOSONG', 'TANPA_TANGGAL',
 ];
 
 function bulatkan(n) {
   return Math.round(n * 1e6) / 1e6;
+}
+
+/** Bulatkan ke d desimal (setengah ke atas), tahan galat floating point: 1,235 -> 1,24 */
+function bulatkanDesimal(n, d) {
+  var f = Math.pow(10, d);
+  return Math.round(parseFloat((n * f).toFixed(8))) / f;
 }
 
 /** Nama sumber yang ikut dihitung (hitungMutasi bukan false), sesuai urutan di MAPPING */
@@ -1529,16 +1542,46 @@ function tahapRekap(rentang, cutoff) {
 
 /**
  * Tahap agregasi saldo berjalan per kode ($setWindowFields + $shift, MongoDB 5.0+).
- * Hasil hanya untuk kode yang saldonya minus di salah satu baris DI DALAM periode:
- *   transisi = true  -> baris pertama di periode yang membuat saldo berubah dari >= 0 menjadi minus
- *   transisi = false -> tidak ada transisi di periode: saldo sudah minus sejak sebelum periode;
- *                       baris yang dikembalikan = baris minus pertama di periode
- *   + saldoMin, barisMinus (jumlah baris dengan saldo minus di periode)
+ *   opsi.per = 'hari'      -> saldo dinilai per AKHIR HARI (zona waktu opsi.tz). Minus sesaat di tengah hari
+ *                             karena urutan jam input tidak dihitung.
+ *   opsi.per = 'transaksi' -> saldo dinilai setelah setiap transaksi.
+ * Hasil hanya untuk kode yang saldonya minus di periode:
+ *   transisi = true  -> titik pertama di periode saat saldo berubah dari >= 0 menjadi minus
+ *   transisi = false -> saldo sudah minus sejak sebelum periode (tidak ada transisi di periode)
+ *   + saldoSebelum, saldo, saldoMin, jumlahMinus (jumlah hari/transaksi dengan saldo minus di periode)
+ *   per hari      : hari, masukHari, keluarHari, dokHari
+ *   per transaksi : asal, arah, qty, docId, idAsal
  */
-function tahapMinus(rentang) {
-  var urut = { tanggal: 1, urutArah: 1, docId: 1 };
-  return [
-    { $match: { tanggalTipe: 'date', tanggal: { $lt: rentang.lt } } },
+function tahapMinus(rentang, opsi) {
+  opsi = opsi || {};
+  var harian = opsi.per === 'hari';
+  var tahap = [{ $match: { tanggalTipe: 'date', tanggal: { $lt: rentang.lt } } }];
+  var urut;
+  var urutAkhir;
+  if (harian) {
+    tahap.push({
+      $group: {
+        _id: {
+          kode: '$kodeBarang',
+          hari: { $dateToString: { format: '%Y-%m-%d', date: '$tanggal', timezone: opsi.tz || TZ_DEFAULT } },
+        },
+        qtyBertanda: { $sum: '$qtyBertanda' },
+        masuk: { $sum: { $cond: [{ $eq: ['$arah', 'IN'] }, { $ifNull: ['$qty', 0] }, 0] } },
+        keluar: { $sum: { $cond: [{ $eq: ['$arah', 'OUT'] }, { $ifNull: ['$qty', 0] }, 0] } },
+        dok: { $sum: 1 },
+        tanggal: { $max: '$tanggal' },
+      },
+    });
+    tahap.push({
+      $project: { _id: 0, kodeBarang: '$_id.kode', hari: '$_id.hari', qtyBertanda: 1, masuk: 1, keluar: 1, dok: 1, tanggal: 1 },
+    });
+    urut = { hari: 1 };
+    urutAkhir = { kodeBarang: 1, __transisi: -1, hari: 1 };
+  } else {
+    urut = { tanggal: 1, urutArah: 1, docId: 1 };
+    urutAkhir = { kodeBarang: 1, __transisi: -1, tanggal: 1, urutArah: 1, docId: 1 };
+  }
+  return tahap.concat([
     {
       $setWindowFields: {
         partitionBy: '$kodeBarang',
@@ -1555,7 +1598,7 @@ function tahapMinus(rentang) {
     },
     { $match: { tanggal: { $gte: rentang.gte }, __saldo: { $lt: -EPS_MUTASI } } },
     { $addFields: { __transisi: { $gte: ['$__sebelum', -EPS_MUTASI] } } },
-    { $sort: { kodeBarang: 1, __transisi: -1, tanggal: 1, urutArah: 1, docId: 1 } },
+    { $sort: urutAkhir },
     {
       $group: {
         _id: '$kodeBarang',
@@ -1563,16 +1606,20 @@ function tahapMinus(rentang) {
         tanggal: { $first: '$tanggal' },
         saldo: { $first: '$__saldo' },
         saldoSebelum: { $first: '$__sebelum' },
+        hari: { $first: '$hari' },
+        masukHari: { $first: '$masuk' },
+        keluarHari: { $first: '$keluar' },
+        dokHari: { $first: '$dok' },
         asal: { $first: '$asal' },
         arah: { $first: '$arah' },
         qty: { $first: '$qty' },
         docId: { $first: '$docId' },
         idAsal: { $first: '$idAsal' },
         saldoMin: { $min: '$__saldo' },
-        barisMinus: { $sum: 1 },
+        jumlahMinus: { $sum: 1 },
       },
     },
-  ];
+  ]);
 }
 
 function _teksKunci(v) {
@@ -1652,6 +1699,7 @@ function tandaiRekap(r, info) {
   if (r.akhir < -EPS_MUTASI) tanda.push('MINUS');
   if (r.awal < -EPS_MUTASI) tanda.push('AWAL_MINUS');
   if (info.minus && r.akhir >= -EPS_MUTASI) tanda.push('PERNAH_MINUS');
+  if (info.minusSesaat && !info.minus && r.akhir >= -EPS_MUTASI) tanda.push('MINUS_SESAAT');
   if (info.cekMaster && !info.master) tanda.push('TIDAK_DI_MASTER');
   if (Object.keys(r.satuan).length > 1) tanda.push('SATUAN_CAMPUR');
   if (r.sebelumCutoff > 0) tanda.push('SEBELUM_CUTOFF');
@@ -2248,5 +2296,5 @@ function render(hasil, ctx) {
   return baris;
 }
 
-return jalankanTool({"nama":"00-peta-data","judul":"Peta data: distribusi nilai kunci (status, arah, proses, satuan) dan relasi id antar koleksi","versi":"0.4.0","pakaiMapping":false}, CONFIG, MAPPING, jalankan, render);
+return jalankanTool({"nama":"00-peta-data","judul":"Peta data: distribusi nilai kunci (status, arah, proses, satuan) dan relasi id antar koleksi","versi":"0.5.0","pakaiMapping":false}, CONFIG, MAPPING, jalankan, render);
 })();

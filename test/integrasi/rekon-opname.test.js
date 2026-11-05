@@ -25,7 +25,8 @@ test('saldo buku s/d akhir tanggal opname vs MONSUS BAP-03', () => {
   const hasil = rekon({});
   assert.equal(hasil.tanggal, '2026-01-31', 'tanggal diambil dari dokumen opname (23:59:59 WIB)');
   assert.equal(hasil.batasBuku, '2026-01-31T17:00:00.000Z');
-  assert.deepEqual(hasil.ringkasan.status, { SELISIH: 3, HANYA_BUKU: 7, HANYA_OPNAME: 1, COCOK: 1 });
+  assert.deepEqual(hasil.ringkasan.status, { SELISIH: 4, HANYA_BUKU: 6, HANYA_OPNAME: 1, COCOK: 2 });
+  assert.equal(hasil.desimal, 2);
   const k = perKode(hasil);
 
   assert.deepEqual([k['MAT-001'].buku, k['MAT-001'].fisik, k['MAT-001'].status], [15, 15, 'COCOK'],
@@ -35,14 +36,17 @@ test('saldo buku s/d akhir tanggal opname vs MONSUS BAP-03', () => {
   assert.deepEqual([k['MAT-003'].fisik, k['MAT-003'].barisOpname, k['MAT-003'].selisih], [990, 2, -8]);
   assert.deepEqual(k['MAT-003'].tanda, ['SATUAN_CAMPUR', 'OPNAME_GANDA']);
   assert.deepEqual([k['S001'].status, k['S001'].selisih], ['HANYA_BUKU', -455]);
+  assert.deepEqual([k['CT-001'].buku, k['CT-001'].fisik, k['CT-001'].status], [50, 150, 'SELISIH']);
+  assert.deepEqual([k['MAT-007'].bukuAsli, k['MAT-007'].buku, k['MAT-007'].fisik, k['MAT-007'].status], [1.2345, 1.23, 1.23, 'COCOK'],
+    'buku dibulatkan 2 desimal mengikuti MONSUS');
   assert.deepEqual([k['OPN-ONLY'].status, k['OPN-ONLY'].buku, k['OPN-ONLY'].selisih], ['HANYA_OPNAME', null, 5]);
   assert.deepEqual(k['OPN-ONLY'].tanda, ['TIDAK_DI_MASTER']);
 
   assert.deepEqual(hasil.kode.map((x) => x.kodeBarang), [
-    'MAT-002', 'FG-001', 'MAT-003',
-    'S001', 'CT-001', 'MAT-004', 'DS-MAT-001', 'SHI', 'FG-0001', 'MAT-005',
+    'CT-001', 'MAT-002', 'FG-001', 'MAT-003',
+    'S001', 'MAT-004', 'DS-MAT-001', 'SHI', 'FG-0001', 'MAT-005',
     'OPN-ONLY',
-    'MAT-001',
+    'MAT-001', 'MAT-007',
   ], 'urut status lalu |selisih| terbesar');
 });
 
@@ -57,7 +61,25 @@ test('TANGGAL eksplisit & KATEGORI', () => {
   assert.equal(k['MAT-001'].buku, 30, 'saldo s/d akhir 15 Jan: 100 - 80 - 50 + 60');
 
   const kat = rekon({ KATEGORI: 'MATERIAL' });
-  assert.deepEqual(kat.kode.map((x) => x.kodeBarang).sort(), ['DS-MAT-001', 'MAT-001', 'MAT-002', 'MAT-003', 'MAT-004', 'MAT-005']);
+  assert.deepEqual(kat.kode.map((x) => x.kodeBarang).sort(),
+    ['DS-MAT-001', 'MAT-001', 'MAT-002', 'MAT-003', 'MAT-004', 'MAT-005', 'MAT-007']);
+});
+
+test('TANGGAL_AWAL: transaksi sebelum tanggal itu diabaikan (meniru periode monitoring)', () => {
+  const hasil = rekon({ TANGGAL_AWAL: '2025-01-01' });
+  const k = perKode(hasil);
+  assert.deepEqual([k['CT-001'].buku, k['CT-001'].status], [150, 'COCOK'], 'transfer bertanggal 2024-11-29 tidak dihitung');
+  assert.deepEqual(hasil.ringkasan.status, { SELISIH: 3, HANYA_BUKU: 6, HANYA_OPNAME: 1, COCOK: 3 });
+  const r = rekon({ TANGGAL_AWAL: '2026-02-01' }, { bolehGagal: true });
+  assert.match(r.stdout + r.stderr, /TANGGAL_AWAL harus sebelum tanggal saldo/);
+});
+
+test('tanpa pembulatan desimal: selisih pembulatan terlihat', () => {
+  const mapping = JSON.parse(JSON.stringify(require('../../config/mapping')));
+  delete mapping.opname.monsus.desimal;
+  const r = h.jalankanTool('02-rekon-opname', DB, { MAPPING: mapping, CONFIG: { FORMAT: 'json' } });
+  const k = perKode(h.ambilJSON(r.stdout).hasil);
+  assert.deepEqual([k['MAT-007'].status, k['MAT-007'].selisih], ['SELISIH', -0.0045]);
 });
 
 test('dokumen opname dengan beberapa tanggal tanpa TANGGAL -> error jelas', () => {
@@ -70,7 +92,8 @@ test('dokumen opname dengan beberapa tanggal tanpa TANGGAL -> error jelas', () =
 
 test('format teks: default hanya yang tidak cocok, TAMPIL semua menampilkan COCOK', () => {
   const teks = h.jalankanTool('02-rekon-opname', DB, {}).stdout;
-  assert.match(teks, /Ringkasan: 12 kode \| SELISIH 3 \| HANYA_BUKU 7 \| HANYA_OPNAME 1 \| COCOK 1/);
+  assert.match(teks, /Ringkasan: 13 kode \| SELISIH 4 \| HANYA_BUKU 6 \| HANYA_OPNAME 1 \| COCOK 2/);
+  assert.match(teks, /buku dibulatkan 2 desimal mengikuti dokumen opname/);
   assert.match(teks, /MAT-002\s+KAIN B\s+MATERIAL\s+YRD\s+-15\s+0\s+15\s+SELISIH\s+BUKU_MINUS/);
   assert.doesNotMatch(teks, /MAT-001\s+KAIN A/);
   const semua = h.jalankanTool('02-rekon-opname', DB, { CONFIG: { TAMPIL: 'semua' } }).stdout;
