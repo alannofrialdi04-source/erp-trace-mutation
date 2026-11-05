@@ -1,0 +1,10 @@
+node_modules/
+.tmp/
+*.log
+
+# Jangan pernah commit kredensial / connection string
+.env
+.env.*
+
+# Output hasil menjalankan tool di database asli (bisa berisi data perusahaan)
+hasil/

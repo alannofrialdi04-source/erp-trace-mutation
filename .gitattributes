@@ -1,0 +1,2 @@
+# Paksa LF supaya `npm run cek:dist` tidak gagal di Windows (core.autocrlf)
+* text=auto eol=lf

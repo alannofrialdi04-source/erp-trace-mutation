@@ -1,0 +1,15 @@
+# MongoDB lokal KHUSUS untuk test (data dummy). Bukan untuk data produksi.
+# Versi bisa disamakan dengan server produksi: MONGO_VERSION=6.0 docker compose up -d --wait
+# (test memakai mongosh di dalam container, jadi image minimal 5.0+)
+services:
+  mongo:
+    image: mongo:${MONGO_VERSION:-7.0}
+    container_name: erp-trace-mongo
+    ports:
+      # Port 27018 supaya tidak bentrok dengan MongoDB lain di laptop
+      - "127.0.0.1:27018:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
