@@ -12,16 +12,25 @@
  * CT-001   transfer bertanggal 2024-11-29 (sebelum cut-off 2025-08-18)       => SEBELUM_CUTOFF
  * SHI      delivery kode yang tidak ada di master                            => MINUS + TIDAK_DI_MASTER
  * DS-MAT-001, S001  normal
+ * MAT-004  saldo awal -5, di Januari: -3 (masih minus), 7, lalu -13         => transisi ke minus di OUT 20
+ * MAT-005  saldo awal -5, di Januari: -3 (tidak pernah >= 0)                => minus sejak sebelum periode
+ * FG-0001  tidak ada di master, mirip FG-001 (salah ketik)                   => TIDAK_DI_MASTER + kode mirip
+ * tbl_monsusdetail (MONSUS20260131-00001, BAP-03, 31 Jan 2026 23:59:59 WIB) untuk 02-rekon-opname:
+ *   MAT-001 15 (cocok) | MAT-002 0 (buku -15) | MAT-003 900+90 (buku 998, 2 baris) | FG-001 0 (buku -10)
+ *   OPN-ONLY 5 (hanya di opname) | + BAP-2, noReg lain, dan baris NGI yang harus tersaring
  * Baris companyCode NGI harus tersaring.
  */
 const { D, OID, INT, DBL } = require('./ejson');
 
 const id = (awalan, n) => awalan + String(n).padStart(24 - awalan.length, '0');
 
-const INC = { A1: id('7a1', 1), A2: id('7a1', 2), B1: id('7a1', 3), C1: id('7a1', 4) };
-const MK = { A1: id('7b1', 1), A2: id('7b1', 2), A3: id('7b1', 3), A4: id('7b1', 4), B1: id('7b1', 5), C1: id('7b1', 6) };
+const INC = { A1: id('7a1', 1), A2: id('7a1', 2), B1: id('7a1', 3), C1: id('7a1', 4), D1: id('7a1', 5), D2: id('7a1', 6), E1: id('7a1', 7) };
+const MK = {
+  A1: id('7b1', 1), A2: id('7b1', 2), A3: id('7b1', 3), A4: id('7b1', 4), B1: id('7b1', 5), C1: id('7b1', 6),
+  D1: id('7b1', 7), D2: id('7b1', 8), E1: id('7b1', 9),
+};
 const PRD = { FG: id('7c1', 1), CT: id('7c1', 2) };
-const DLV = { D1: id('7d1', 1), D2: id('7d1', 2), D3: id('7d1', 3), D4: id('7d1', 4), SHI: id('7d1', 5) };
+const DLV = { D1: id('7d1', 1), D2: id('7d1', 2), D3: id('7d1', 3), D4: id('7d1', 4), SHI: id('7d1', 5), D5: id('7d1', 6) };
 const TRF = { T1: id('7e1', 1), T2: id('7e1', 2) };
 const DS1 = id('7f1', 1);
 const SCP1 = id('7f2', 1);
@@ -69,6 +78,13 @@ function delivery(_id, kode, qty, tgl, noReg, isDeleted) {
   };
 }
 
+function monsus(kode, qty, bap) {
+  return {
+    companyCode: 'WAG', kodeBarang: kode, namaBarang: 'OPNAME ' + kode, noReg: 'MONSUS20260131-00001', noBap: bap,
+    qty: DBL(qty), satuan: '', tanggal: D('2026-01-31T16:59:59Z'),
+  };
+}
+
 module.exports = {
   tbl_barang: [
     { companyCode: 'WAG', kodeBarang: 'MAT-001', namaBarang: 'KAIN A', jenisBc: 'MATERIAL', satuan: 'YRD' },
@@ -78,6 +94,8 @@ module.exports = {
     { companyCode: 'WAG', kodeBarang: 'FG-001', namaBarang: 'KAOS', jenisBc: 'BARANG JADI', satuan: 'PCE' },
     { companyCode: 'WAG', kodeBarang: 'CT-001', namaBarang: 'CUTTING KAOS', jenisBc: 'BARANG SETENGAH JADI', satuan: 'PCE' },
     { companyCode: 'WAG', kodeBarang: 'S001', namaBarang: 'POTONGAN KAIN SISA', jenisBc: 'SCRAP', satuan: 'KGM' },
+    { companyCode: 'WAG', kodeBarang: 'MAT-004', namaBarang: 'KAIN D', jenisBc: 'MATERIAL', satuan: 'YRD' },
+    { companyCode: 'WAG', kodeBarang: 'MAT-005', namaBarang: 'KAIN E', jenisBc: 'MATERIAL', satuan: 'YRD' },
     { companyCode: 'NGI', kodeBarang: 'MAT-001', namaBarang: 'KAIN A NGI', jenisBc: 'MATERIAL', satuan: 'YRD' },
   ],
 
@@ -86,6 +104,9 @@ module.exports = {
     incoming(INC.A2, 'MAT-001', 60, 'YRD', '2026-01-15T03:00:00Z', 'GRN20260115-00001'),
     incoming(INC.B1, 'MAT-002', 10, 'YRD', '2026-01-03T03:00:00Z', 'GRN20260103-00001'),
     incoming(INC.C1, 'MAT-003', 1000, 'MTR', '2026-01-02T03:00:00Z', 'GRN20260102-00001'),
+    incoming(INC.D1, 'MAT-004', 2, 'YRD', '2026-01-02T04:00:00Z', 'GRN20260102-00002'),
+    incoming(INC.D2, 'MAT-004', 10, 'YRD', '2026-01-03T04:00:00Z', 'GRN20260103-00002'),
+    incoming(INC.E1, 'MAT-005', 2, 'YRD', '2026-01-05T04:00:00Z', 'GRN20260105-00001'),
   ],
 
   tbl_materialkeluardetail: [
@@ -95,6 +116,9 @@ module.exports = {
     materialKeluar(MK.A4, 'MAT-001', 7, 'YRD', '2026-01-31T17:00:00Z', 'OUTWH20260201-00001', INC.A2),
     materialKeluar(MK.B1, 'MAT-002', 25, 'YRD', '2026-01-04T02:00:00Z', 'OUTWH20260104-00001', INC.B1),
     materialKeluar(MK.C1, 'MAT-003', 2, 'CJ', '2026-01-06T02:00:00Z', 'OUTWH20260106-00001', INC.C1),
+    materialKeluar(MK.D1, 'MAT-004', 5, 'YRD', '2025-12-20T02:00:00Z', 'OUTWH20251220-00001', INC.D1),
+    materialKeluar(MK.D2, 'MAT-004', 20, 'YRD', '2026-01-04T02:00:00Z', 'OUTWH20260104-00002', INC.D2),
+    materialKeluar(MK.E1, 'MAT-005', 5, 'YRD', '2025-12-21T02:00:00Z', 'OUTWH20251221-00001', INC.E1),
   ],
 
   tbl_productiondetail: [
@@ -108,6 +132,7 @@ module.exports = {
     delivery(DLV.D3, 'FG-001', 100, '2026-01-16T05:00:00Z', 'OUT20260116-00001', false),
     delivery(DLV.D4, 'FG-001', 10, '2026-01-25T05:00:00Z', 'OUT20260125-00001', false),
     delivery(DLV.SHI, 'SHI', 5, '2026-01-22T05:00:00Z', 'OUT20260122-00001', false),
+    delivery(DLV.D5, 'FG-0001', 3, '2026-01-15T05:00:00Z', 'OUT20260115-00001', false),
   ],
 
   tbl_transferproduction: [
@@ -147,6 +172,25 @@ module.exports = {
     stok('TRANSFER', 'OUT', 'CT-001', 150, 'PCE', '2026-01-09T05:00:00Z', TRF.T2, 'CUTTING'),
     stok('DELIVERY', 'OUT', 'SHI', 5, 'PCE', '2026-01-22T05:00:00Z', DLV.SHI),
     stok('SCRAP', 'IN', 'S001', 455, 'KGM', '2026-01-11T09:00:00Z', SCP1),
+    stok('MATERIALOUT', 'OUT', 'MAT-004', 5, 'YRD', '2025-12-20T02:00:00Z', MK.D1),
+    stok('INCOMING', 'IN', 'MAT-004', 2, 'YRD', '2026-01-02T04:00:00Z', INC.D1),
+    stok('INCOMING', 'IN', 'MAT-004', 10, 'YRD', '2026-01-03T04:00:00Z', INC.D2),
+    stok('MATERIALOUT', 'OUT', 'MAT-004', 20, 'YRD', '2026-01-04T02:00:00Z', MK.D2),
+    stok('MATERIALOUT', 'OUT', 'MAT-005', 5, 'YRD', '2025-12-21T02:00:00Z', MK.E1),
+    stok('INCOMING', 'IN', 'MAT-005', 2, 'YRD', '2026-01-05T04:00:00Z', INC.E1),
+    stok('DELIVERY', 'OUT', 'FG-0001', 3, 'PCE', '2026-01-15T05:00:00Z', DLV.D5),
     stok('INCOMING', 'IN', 'MAT-001', 999, 'YRD', '2026-01-07T03:00:00Z', INC.A1, '', 'NGI'),
+  ],
+
+  tbl_monsusdetail: [
+    monsus('MAT-001', 15, 'BAP-03'),
+    monsus('MAT-002', 0, 'BAP-03'),
+    monsus('MAT-003', 900, 'BAP-03'),
+    monsus('MAT-003', 90, 'BAP-03'),
+    monsus('FG-001', 0, 'BAP-03'),
+    monsus('OPN-ONLY', 5, 'BAP-03'),
+    monsus('MAT-001', 100, 'BAP-2'),
+    Object.assign(monsus('MAT-001', 100, 'BAP-1'), { noReg: 'MONSUS20260406-00001', tanggal: D('2026-04-06T16:59:59Z') }),
+    Object.assign(monsus('MAT-001', 999, 'BAP-03'), { companyCode: 'NGI' }),
   ],
 };

@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- *  ERP Trace Mutation | 00-profil-skema | v0.3.0
+ *  ERP Trace Mutation | 00-profil-skema | v0.4.0
  *  Profil struktur koleksi: field, tipe data, keterisian, dan pola nilai (data asli disamarkan)
  * ----------------------------------------------------------------------------
  *  FILE HASIL BUILD. Yang boleh diedit hanya blok KONFIGURASI di bawah.
@@ -86,6 +86,10 @@ var CONFIG = {
  *
  * MASTER BARANG
  *   master.field : kodeBarang (wajib), companyCode, nama, kategori, satuan
+ *
+ * DOKUMEN HITUNG FISIK (opname)
+ *   opname.<nama>.field : kodeBarang, qty, tanggal (wajib), companyCode, noReg, noBap, satuan, nama
+ *   MONSUS = monitoring khusus Bea Cukai, setara hasil opname tahunan.
  */
 var MAPPING = {
   meta: {
@@ -105,6 +109,37 @@ var MAPPING = {
       nama: 'namaBarang',
       kategori: 'jenisBc', // MATERIAL | BARANG SETENGAH JADI | BARANG JADI | MESIN | SCRAP
       satuan: 'satuan',
+    },
+  },
+
+  // Dokumen hitung fisik untuk rekonsiliasi (02-rekon-opname)
+  opname: {
+    monsus: {
+      label: 'Monitoring khusus Bea Cukai (hasil opname)',
+      koleksi: 'tbl_monsusdetail',
+      field: {
+        kodeBarang: 'kodeBarang',
+        qty: 'qty',
+        tanggal: 'tanggal', // 23:59:59 WIB tanggal opname
+        companyCode: 'companyCode',
+        noReg: 'noReg',
+        noBap: 'noBap',
+        satuan: 'satuan',
+        nama: 'namaBarang',
+      },
+    },
+    stokopname: {
+      label: 'Stock opname',
+      koleksi: 'tbl_stokopnamedetail',
+      field: {
+        kodeBarang: 'kodeBarang',
+        qty: 'qtyOpname',
+        tanggal: 'tglOpname',
+        companyCode: 'companyCode',
+        noReg: 'noReg',
+        noBap: 'noBap',
+        nama: 'namaBarang',
+      },
     },
   },
 
@@ -764,7 +799,9 @@ var FIELD_OPSIONAL = [
 var ARAH_STATIS = ['IN', 'OUT', 'TANDA_QTY'];
 var KONVERSI_LINK = ['toObjectId', 'toString'];
 var KUNCI_SUMBER = ['label', 'koleksi', 'arah', 'kategori', 'hitungMutasi', 'filter', 'field', 'header', 'rujukan'];
-var KUNCI_MAPPING = ['meta', 'timezone', 'sumber', 'master'];
+var KUNCI_MAPPING = ['meta', 'timezone', 'sumber', 'master', 'opname'];
+var FIELD_OPNAME_WAJIB = ['kodeBarang', 'qty', 'tanggal'];
+var FIELD_OPNAME_OPSIONAL = ['companyCode', 'noReg', 'noBap', 'satuan', 'nama'];
 var FIELD_MASTER_WAJIB = ['kodeBarang'];
 var FIELD_MASTER_OPSIONAL = ['companyCode', 'nama', 'kategori', 'satuan'];
 var KUNCI_HEADER = ['koleksi', 'localField', 'foreignField', 'konversi', 'filter', 'field'];
@@ -867,6 +904,37 @@ function _validasiMaster(master, err, warn) {
   }
   for (var j = 0; j < FIELD_MASTER_WAJIB.length; j++) {
     if (!_teksIsi(master.field[FIELD_MASTER_WAJIB[j]])) err(p + '.field.' + FIELD_MASTER_WAJIB[j], 'wajib diisi');
+  }
+}
+
+function _validasiOpname(opname, err, warn) {
+  if (!_objekBiasa(opname) || Object.keys(opname).length === 0) {
+    err('opname', 'harus berupa objek { namaDokumen: { koleksi, field } } yang tidak kosong');
+    return;
+  }
+  var kunci = Object.keys(opname);
+  var dikenal = FIELD_OPNAME_WAJIB.concat(FIELD_OPNAME_OPSIONAL);
+  for (var i = 0; i < kunci.length; i++) {
+    var p = 'opname.' + kunci[i];
+    var o = opname[kunci[i]];
+    if (!_objekBiasa(o)) {
+      err(p, 'harus berupa objek { label, koleksi, field }');
+      continue;
+    }
+    _kunciAsing(p, o, ['label', 'koleksi', 'field'], warn);
+    if (!_teksIsi(o.koleksi)) err(p + '.koleksi', 'wajib diisi nama koleksi');
+    if (!_objekBiasa(o.field)) {
+      err(p + '.field', 'wajib berupa objek { kodeBarang, qty, tanggal, ... }');
+      continue;
+    }
+    var kf = Object.keys(o.field);
+    for (var j = 0; j < kf.length; j++) {
+      if (dikenal.indexOf(kf[j]) < 0) warn(p + '.field.' + kf[j], 'field opname tidak dikenal. Yang dikenal: ' + dikenal.join(', '));
+      else if (!_teksIsi(o.field[kf[j]])) err(p + '.field.' + kf[j], 'harus berupa nama field (teks)');
+    }
+    for (var w = 0; w < FIELD_OPNAME_WAJIB.length; w++) {
+      if (!_teksIsi(o.field[FIELD_OPNAME_WAJIB[w]])) err(p + '.field.' + FIELD_OPNAME_WAJIB[w], 'wajib diisi');
+    }
   }
 }
 
@@ -1046,6 +1114,7 @@ function validasiMapping(mapping) {
   for (var i = 0; i < kunci.length; i++) _validasiSumber(kunci[i], mapping.sumber[kunci[i]], err, warn);
   _validasiRujukan(mapping, err);
   if (mapping.master !== undefined && mapping.master !== null) _validasiMaster(mapping.master, err, warn);
+  if (mapping.opname !== undefined && mapping.opname !== null) _validasiOpname(mapping.opname, err, warn);
   return { error: error, peringatan: peringatan };
 }
 
@@ -1357,28 +1426,41 @@ function tahapRekap(rentang, cutoff) {
 }
 
 /**
- * Tahap agregasi saldo berjalan per kode ($setWindowFields, MongoDB 5.0+).
- * Hasil hanya untuk kode yang saldonya pernah minus DI DALAM periode:
- *   { _id: kode, tanggal, saldo, asal, arah, qty, docId, idAsal } = baris pertama yang membuat minus
- *   + saldoMin, barisMinus
+ * Tahap agregasi saldo berjalan per kode ($setWindowFields + $shift, MongoDB 5.0+).
+ * Hasil hanya untuk kode yang saldonya minus di salah satu baris DI DALAM periode:
+ *   transisi = true  -> baris pertama di periode yang membuat saldo berubah dari >= 0 menjadi minus
+ *   transisi = false -> tidak ada transisi di periode: saldo sudah minus sejak sebelum periode;
+ *                       baris yang dikembalikan = baris minus pertama di periode
+ *   + saldoMin, barisMinus (jumlah baris dengan saldo minus di periode)
  */
 function tahapMinus(rentang) {
+  var urut = { tanggal: 1, urutArah: 1, docId: 1 };
   return [
     { $match: { tanggalTipe: 'date', tanggal: { $lt: rentang.lt } } },
     {
       $setWindowFields: {
         partitionBy: '$kodeBarang',
-        sortBy: { tanggal: 1, urutArah: 1, docId: 1 },
+        sortBy: urut,
         output: { __saldo: { $sum: '$qtyBertanda', window: { documents: ['unbounded', 'current'] } } },
       },
     },
+    {
+      $setWindowFields: {
+        partitionBy: '$kodeBarang',
+        sortBy: urut,
+        output: { __sebelum: { $shift: { output: '$__saldo', by: -1, default: 0 } } },
+      },
+    },
     { $match: { tanggal: { $gte: rentang.gte }, __saldo: { $lt: -EPS_MUTASI } } },
-    { $sort: { kodeBarang: 1, tanggal: 1, urutArah: 1, docId: 1 } },
+    { $addFields: { __transisi: { $gte: ['$__sebelum', -EPS_MUTASI] } } },
+    { $sort: { kodeBarang: 1, __transisi: -1, tanggal: 1, urutArah: 1, docId: 1 } },
     {
       $group: {
         _id: '$kodeBarang',
+        transisi: { $first: '$__transisi' },
         tanggal: { $first: '$tanggal' },
         saldo: { $first: '$__saldo' },
+        saldoSebelum: { $first: '$__sebelum' },
         asal: { $first: '$asal' },
         arah: { $first: '$arah' },
         qty: { $first: '$qty' },
@@ -1569,6 +1651,39 @@ function angkaSampel(nilai, nama) {
   }
   if (n > BATAS_SAMPEL) throw new Error('CONFIG.' + nama + ' maksimal ' + BATAS_SAMPEL + ' (sekarang: ' + n + ')');
   return n;
+}
+
+/**
+ * Master barang (MAPPING.master) untuk companyCode tertentu.
+ * Hasil: { ada: bool, peta: { kodeTrim: { nama, kategori, satuan, ganda } } }
+ */
+function ambilMaster(d, mapping, companyCode, kodeList, kategori) {
+  var master = mapping.master;
+  if (!master) {
+    if (kategori) throw new Error('CONFIG.KATEGORI butuh MAPPING.master');
+    return { ada: false, peta: {} };
+  }
+  var f = master.field;
+  var match = {};
+  if (companyCode && f.companyCode) match[f.companyCode] = companyCode;
+  if (kodeList) match[f.kodeBarang] = { $in: kodeList };
+  if (kategori) {
+    if (!f.kategori) throw new Error('CONFIG.KATEGORI butuh MAPPING.master.field.kategori');
+    match[f.kategori] = kategori;
+  }
+  var proyeksi = { _id: 0, kode: '$' + f.kodeBarang };
+  proyeksi.nama = f.nama ? { $ifNull: ['$' + f.nama, null] } : { $literal: null };
+  proyeksi.kategori = f.kategori ? { $ifNull: ['$' + f.kategori, null] } : { $literal: null };
+  proyeksi.satuan = f.satuan ? { $ifNull: ['$' + f.satuan, null] } : { $literal: null };
+  var baris = jalankanAgregasi(d, master.koleksi, [{ $match: match }, { $project: proyeksi }]);
+  var peta = {};
+  for (var i = 0; i < baris.length; i++) {
+    if (typeof baris[i].kode !== 'string') continue;
+    var k = baris[i].kode.trim();
+    if (peta[k]) peta[k].ganda++;
+    else peta[k] = { nama: baris[i].nama, kategori: baris[i].kategori, satuan: baris[i].satuan, ganda: 0 };
+  }
+  return { ada: true, peta: peta };
 }
 
 function _versiServer(d) {
@@ -1955,5 +2070,5 @@ function render(hasil, ctx) {
   return baris;
 }
 
-return jalankanTool({"nama":"00-profil-skema","judul":"Profil struktur koleksi: field, tipe data, keterisian, dan pola nilai (data asli disamarkan)","versi":"0.3.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
+return jalankanTool({"nama":"00-profil-skema","judul":"Profil struktur koleksi: field, tipe data, keterisian, dan pola nilai (data asli disamarkan)","versi":"0.4.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
 })();

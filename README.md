@@ -23,14 +23,14 @@ Saldo dihitung dengan model `Saldo Akhir = Saldo Awal + Pemasukan − Pengeluara
 
 ## Status
 
-Versi **0.3.0**: Fase 1 selesai.
+Versi **0.4.0**: Fase 1 selesai, rekonsiliasi dengan hasil opname tersedia.
 
 | Fase | Isi | Status |
 |---|---|---|
 | 0 | Engine normalisasi berbasis mapping, helper periode WIB, build, test, tool `00-profil-skema` dan `00-cek-mapping` | Selesai |
 | 1 | `00-peta-data` (distribusi nilai kunci + relasi `idAsal`), mapping `erpgarment` berbasis ledger `tbl_stok`, `01-mutasi` (rekap saldo per kode + kartu stok dengan saldo berjalan dan cek per baris ke dokumen sumber) | Selesai |
-| 2 | `02-duplikat`, `03-orphan` (termasuk counter lot `qtyOut`/`qtyBalance` vs transaksi OUT), `04-anomali` | Belum |
-| 3 | `05-cross-module` (termasuk ledger `tbl_stok` vs transaksi sumber, header `listDetail` vs koleksi detail), template koreksi data yang aman, CI | Belum |
+| 2 | `02-rekon-opname`: saldo buku vs MONSUS (monitoring khusus Bea Cukai = hasil opname) / stock opname per kode | Selesai |
+| 3 | `03-kronologi` (transaksi OUT bertanggal sebelum IN yang dirujuknya), duplikat, counter lot `qtyOut`/`qtyBalance` vs transaksi OUT, header `listDetail` vs koleksi detail, template koreksi data yang aman, CI | Belum |
 
 > **Dasar mapping.** Nama koleksi & field diverifikasi dengan profil schema dan `00-peta-data` (2026-11-05). Jumlah dokumen dan total qty `tbl_stok` sama persis dengan transaksi sumber untuk MATERIALOUT, DELIVERY, PRODUCTION, TRANSFER, DEADSTOK, dan SCRAP; INCOMING selisih 10 dokumen. Satu hal yang masih asumsi: ledger INCOMING diasumsikan memakai `qtyWh`. Kalau salah, kolom CEK kartu stok akan menunjukkan `QTY_BEDA` pada baris INCOMING.
 
@@ -245,7 +245,7 @@ Menghitung mutasi dari sumber yang `hitungMutasi`-nya tidak `false` (untuk `erpg
 - **Saldo awal** adalah akumulasi semua transaksi **sebelum** periode. Tidak ada tabel saldo awal terpisah. Cut-off 18 Agustus 2025 (stock opname mesin) sudah tercatat sebagai transaksi INCOMING `SALDO AWAL`.
 - **Masuk/keluar** adalah transaksi **di dalam** periode, dengan batas WIB dan batas atas eksklusif.
 
-**Mode `rekap`:** satu baris per kode barang berisi saldo awal, masuk, keluar, saldo akhir, satuan, dan tanda masalah. Disertai mutasi per asal (INCOMING, MATERIALOUT, DELIVERY, …) dan, untuk kode yang saldonya pernah minus, **transaksi pertama yang membuat saldo minus** (dihitung dengan saldo berjalan per kode).
+**Mode `rekap`:** satu baris per kode barang berisi saldo awal, masuk, keluar, saldo akhir, satuan, dan tanda masalah. Disertai mutasi per asal (INCOMING, MATERIALOUT, DELIVERY, …). Untuk kode yang saldonya minus di periode, ditampilkan **transaksi yang mengubah saldo dari ≥ 0 menjadi minus** (saldo berjalan per kode). Kalau saldo sudah minus sejak sebelum periode dan tidak pernah kembali ≥ 0, itu yang dilaporkan. Untuk kode yang tidak ada di master, ditampilkan **kode mirip di master** (kemungkinan salah ketik).
 
 **Mode `kartu`:** semua transaksi satu atau beberapa kode (maks 20) dengan saldo berjalan. Setiap baris ledger dicocokkan ke dokumen sumbernya lewat `idAsal` (`CEK_SUMBER`), dan ditampilkan nomor transaksinya (GRN…/OUTWH…/OUT…/PRD…/TRF…) serta jenis dokumen BC.
 
@@ -299,9 +299,9 @@ KODE     NAMA    KATEGORI     SAT  SALDO AWAL  MASUK  KELUAR  SALDO AKHIR  TANDA
 FG-001   KAOS    BARANG JADI  PCE           0    500     510          -10  MINUS
 MAT-001  KAIN A  MATERIAL     YRD         100     60     145           15  PERNAH_MINUS
 
-Transaksi pertama yang membuat saldo minus di periode ini:
-  FG-001 : 2026-01-20 12:00 | DELIVERY OUT 10 | saldo -10 | saldo terendah -10 (1 baris minus)
-  MAT-001 : 2026-01-10 09:00 | MATERIALOUT OUT 50 | saldo -30 | saldo terendah -30 (1 baris minus)
+Penyebab saldo minus di periode ini (transaksi yang mengubah saldo dari >= 0 menjadi minus):
+  FG-001 : 2026-01-20 12:00 | DELIVERY OUT 10 | saldo 0 -> -10 | terendah -10 (1 baris minus)
+  MAT-001 : 2026-01-10 09:00 | MATERIALOUT OUT 50 | saldo 20 -> -30 | terendah -30 (1 baris minus)
 Telusuri per transaksi dengan MODE: "kartu" dan KODE_BARANG berisi kode di atas.
 ```
 
@@ -319,8 +319,57 @@ TANGGAL (WIB)     ASAL        PROSES       NO. TRANSAKSI                 DOK    
 2026-01-18 12:00  DELIVERY                                                                 30      0  PCE  SUMBER_HILANG
 2026-01-20 12:00  DELIVERY                 OUT20260125-00001             BC 30             10    -10  PCE  TANGGAL_BEDA
 Saldo akhir: -10 (masuk 500, keluar 510, 6 transaksi)
-Saldo pertama kali minus: 2026-01-20 12:00 | DELIVERY OUT 10 | saldo -10 | OUT20260125-00001
+Saldo berubah jadi minus: 2026-01-20 12:00 | DELIVERY OUT 10 | saldo 0 -> -10 | OUT20260125-00001
+Cek sumber: OK 2 | SUMBER_DIHAPUS 1 | QTY_BEDA 1 | SUMBER_HILANG 1 | TANGGAL_BEDA 1
 ```
+
+### `02-rekon-opname`: saldo buku vs hasil opname
+
+Membandingkan **saldo buku** (dari sumber yang dihitung, untuk `erpgarment`: ledger `tbl_stok`) **sampai akhir tanggal opname (WIB)** dengan qty di dokumen hitung fisik `MAPPING.opname`:
+
+- `monsus`: `tbl_monsusdetail`, monitoring khusus Bea Cukai (setara hasil opname tahunan);
+- `stokopname`: `tbl_stokopnamedetail`.
+
+Selisih = fisik − buku. Positif berarti fisik lebih banyak dari buku; negatif berarti buku lebih banyak dari fisik.
+
+| CONFIG | Default | Keterangan |
+|---|---|---|
+| `OPNAME` | `'monsus'` | Nama dokumen di `MAPPING.opname` |
+| `NO_REG` | `'MONSUS20260131-00001'` | Nomor registrasi dokumen. Sebaiknya diisi supaya tidak mencampur beberapa dokumen |
+| `NO_BAP` | `'BAP-03'` | Nomor BAP (opsional); satu noReg bisa berisi beberapa BAP |
+| `TANGGAL` | `null` | Tanggal saldo buku (`YYYY-MM-DD`). `null` = tanggal dokumen opname (harus satu tanggal) |
+| `COMPANY_CODE` | `'WAG'` | Filter companyCode |
+| `KATEGORI` | `null` | Batasi **kedua sisi** ke kategori master, mis. `'MATERIAL'` |
+| `TOLERANSI` | `0.0001` | Selisih absolut di bawah ini dianggap cocok |
+| `TAMPIL` | `'selisih'` | Teks: `'selisih'` (hanya yang tidak cocok) atau `'semua'` |
+| `TAMPIL_MAKS` | `300` | Baris maksimal di output teks |
+
+| Status | Arti |
+|---|---|
+| `SELISIH` | Ada di buku dan opname, qty berbeda |
+| `HANYA_BUKU` | Saldo buku ≠ 0 tetapi kode tidak ada di dokumen opname |
+| `HANYA_OPNAME` | Ada di opname tetapi tidak ada transaksi di buku |
+| `COCOK` | Selisih dalam toleransi |
+
+Tanda tambahan: `BUKU_MINUS`, `TIDAK_DI_MASTER`, `SATUAN_CAMPUR` (satuan buku campur), `OPNAME_GANDA` (kode muncul lebih dari sekali di dokumen opname; qty dijumlah), `QTY_OPNAME_KOSONG`.
+
+Contoh (data dummy dari test):
+
+```text
+Opname : Monitoring khusus Bea Cukai (hasil opname) | noReg MONSUS20260131-00001 | BAP BAP-03 | companyCode "WAG"
+Saldo buku: stok s/d akhir 2026-01-31 WIB (transaksi < 2026-02-01 00:00:00) | toleransi 0.0001
+Ringkasan: 12 kode | SELISIH 3 | HANYA_BUKU 7 | HANYA_OPNAME 1 | COCOK 1
+
+KODE        NAMA                KATEGORI              SAT     BUKU  FISIK  SELISIH  STATUS        TANDA
+----------  ------------------  --------------------  ------  ----  -----  -------  ------------  --------------------------
+MAT-002     KAIN B              MATERIAL              YRD      -15      0       15  SELISIH       BUKU_MINUS
+FG-001      KAOS                BARANG JADI           PCE      -10      0       10  SELISIH       BUKU_MINUS
+MAT-003     BENANG              MATERIAL              CJ+MTR   998    990       -8  SELISIH       SATUAN_CAMPUR,OPNAME_GANDA
+S001        POTONGAN KAIN SISA  SCRAP                 KGM      455      -     -455  HANYA_BUKU
+OPN-ONLY    OPNAME OPN-ONLY                                      -      5        5  HANYA_OPNAME  TIDAK_DI_MASTER
+```
+
+(potongan; baris HANYA_BUKU lain tidak ditampilkan di sini)
 
 ---
 
@@ -354,6 +403,7 @@ sumber: {
 - **Field logis wajib:** `tanggal`, `companyCode`, `kodeBarang`, `qty`
 - **Field logis opsional:** `noTransaksi`, `idAsal`, `idDokumen`, `noAju`, `noReg`, `noUrut`, `jenisDokumen`, `satuan`, `gudang`, `createdAt`, `asal`, `proses`, `dihapus`
 - **`rujukan`:** baris dengan `asal` X dicari dokumen sumbernya di sumber `rujukan[X]` lewat `_id = idAsal`. Kunci `'ASAL:ARAH'` (mis. `'DEADSTOK:OUT'`) didahulukan dari `'ASAL'`.
+- **`opname`:** dokumen hitung fisik untuk `02-rekon-opname`, `{ nama: { label, koleksi, field: { kodeBarang, qty, tanggal, companyCode, noReg, noBap, satuan, nama } } }`.
 - **Arah dari field** dibandingkan setelah trim + huruf besar. Sumber yang field-nya ada di koleksi header bisa memakai `header: { koleksi, localField, foreignField, konversi, field }`.
 
 **Periode selalu dihitung dalam WIB** (`timezone: '+07:00'`) dengan batas atas eksklusif. Contoh November 2026:
@@ -404,7 +454,7 @@ MONGOSH_BIN=mongosh MONGO_URI_DASAR=mongodb://localhost:27018 npm run test:integ
 config/mapping.js       mapping koleksi & field (satu-satunya yang disesuaikan per ERP)
 src/lib/                tanggal (WIB), teks (pola/kandidat), tabel, bson, mapping (validasi),
                         sumber (pipeline normalisasi), mutasi (rekap, saldo berjalan, cek sumber),
-                        runner (lapisan mongosh)
+                        runner (lapisan mongosh: eksekusi query, master barang, output)
 src/tools/              satu file per tool: blok CONFIG + jalankan() + render()
 scripts/build.js        gabungkan CONFIG + MAPPING + lib + tool -> dist/<tool>.js
 dist/                   hasil build, siap dijalankan (ikut di-commit)

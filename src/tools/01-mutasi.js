@@ -59,33 +59,10 @@ function _mutasiDaftarKode(nilai) {
   return hasil.length ? hasil : null;
 }
 
-function _mutasiAmbilMaster(d, mapping, companyCode, kodeList, kategori) {
-  var master = mapping.master;
-  if (!master) {
-    if (kategori) throw new Error('CONFIG.KATEGORI butuh MAPPING.master');
-    return { ada: false, peta: {} };
-  }
-  var f = master.field;
-  var match = {};
-  if (companyCode && f.companyCode) match[f.companyCode] = companyCode;
-  if (kodeList) match[f.kodeBarang] = { $in: kodeList };
-  if (kategori) {
-    if (!f.kategori) throw new Error('CONFIG.KATEGORI butuh MAPPING.master.field.kategori');
-    match[f.kategori] = kategori;
-  }
-  var proyeksi = { _id: 0, kode: '$' + f.kodeBarang };
-  proyeksi.nama = f.nama ? { $ifNull: ['$' + f.nama, null] } : { $literal: null };
-  proyeksi.kategori = f.kategori ? { $ifNull: ['$' + f.kategori, null] } : { $literal: null };
-  proyeksi.satuan = f.satuan ? { $ifNull: ['$' + f.satuan, null] } : { $literal: null };
-  var baris = jalankanAgregasi(d, master.koleksi, [{ $match: match }, { $project: proyeksi }]);
-  var peta = {};
-  for (var i = 0; i < baris.length; i++) {
-    if (typeof baris[i].kode !== 'string') continue;
-    var k = baris[i].kode.trim();
-    if (peta[k]) peta[k].ganda++;
-    else peta[k] = { nama: baris[i].nama, kategori: baris[i].kategori, satuan: baris[i].satuan, ganda: 0 };
-  }
-  return { ada: true, peta: peta };
+/** Semua kode di master (untuk saran kode mirip), diambil sekali per jalankan */
+function _mutasiKodeMaster(ctx, mapping, config) {
+  if (!ctx.__kodeMaster) ctx.__kodeMaster = Object.keys(ambilMaster(ctx.db, mapping, config.COMPANY_CODE, null, null).peta);
+  return ctx.__kodeMaster;
 }
 
 function _mutasiFilter(config, kode) {
@@ -127,8 +104,10 @@ function _mutasiRekap(config, mapping, ctx, rentang, cutoff, kunci, kodeList, ma
     r.master = m ? { nama: m.nama, kategori: m.kategori, satuan: m.satuan } : null;
     r.minus = infoMinus
       ? {
+        transisi: infoMinus.transisi,
         tanggal: infoMinus.tanggal,
         saldo: bulatkan(infoMinus.saldo),
+        saldoSebelum: bulatkan(infoMinus.saldoSebelum),
         asal: infoMinus.asal,
         arah: infoMinus.arah,
         qty: infoMinus.qty,
@@ -139,6 +118,9 @@ function _mutasiRekap(config, mapping, ctx, rentang, cutoff, kunci, kodeList, ma
       }
       : null;
     r.tanda = tandaiRekap(r, { master: m, cekMaster: master.ada, minus: infoMinus });
+    if (master.ada && !m && typeof r.kodeBarang === 'string') {
+      r.kodeMirip = kandidatNama(r.kodeBarang, _mutasiKodeMaster(ctx, mapping, config), 3);
+    }
     for (var t = 0; t < r.tanda.length; t++) hasil.ringkasan.tanda[r.tanda[t]] = (hasil.ringkasan.tanda[r.tanda[t]] || 0) + 1;
     for (var a in r.perAsal) {
       var pa = hasil.ringkasan.perAsal[a] || (hasil.ringkasan.perAsal[a] = { masuk: 0, keluar: 0, dok: 0 });
@@ -234,12 +216,19 @@ function _mutasiKartuSatuKode(config, mapping, ctx, rentang, cutoff, kunci, kode
   var terpotong = baris.length > maks;
   if (terpotong) baris = baris.slice(0, maks);
 
-  var saldo = r ? r.awal : 0;
+  var saldoAwal = r ? r.awal : 0;
+  var saldo = saldoAwal;
   var minusPertama = null;
+  var adaMinus = false;
   for (var i = 0; i < baris.length; i++) {
+    var sebelum = saldo;
     saldo = bulatkan(saldo + baris[i].qtyBertanda);
     baris[i].saldo = saldo;
-    if (!minusPertama && saldo < -EPS_MUTASI) minusPertama = baris[i];
+    baris[i].saldoSebelum = sebelum;
+    if (saldo < -EPS_MUTASI) {
+      adaMinus = true;
+      if (!minusPertama && sebelum >= -EPS_MUTASI) minusPertama = baris[i];
+    }
   }
   if (config.CEK_SUMBER) _mutasiCekSumber(ctx, mapping, baris);
 
@@ -268,7 +257,7 @@ function _mutasiKartuSatuKode(config, mapping, ctx, rentang, cutoff, kunci, kode
     });
   }
   var m = master.ada ? master.peta[kode.trim()] || null : null;
-  var tanda = r ? tandaiRekap(r, { master: m, cekMaster: master.ada, minus: minusPertama }) : [];
+  var tanda = r ? tandaiRekap(r, { master: m, cekMaster: master.ada, minus: adaMinus ? true : null }) : [];
   if (!r && master.ada && !m) tanda.push('TIDAK_DI_MASTER');
   return {
     kodeBarang: kode,
@@ -282,8 +271,14 @@ function _mutasiKartuSatuKode(config, mapping, ctx, rentang, cutoff, kunci, kode
     jumlahBaris: keluaran.length,
     terpotong: terpotong,
     minusPertama: minusPertama
-      ? { tanggal: minusPertama.tanggal, asal: minusPertama.asal, arah: minusPertama.arah, qty: minusPertama.qty, saldo: minusPertama.saldo, docId: minusPertama.docId, dokSumber: minusPertama.dokSumber || null }
+      ? {
+        tanggal: minusPertama.tanggal, asal: minusPertama.asal, arah: minusPertama.arah, qty: minusPertama.qty,
+        saldoSebelum: minusPertama.saldoSebelum, saldo: minusPertama.saldo, docId: minusPertama.docId,
+        dokSumber: minusPertama.dokSumber || null,
+      }
       : null,
+    minusSejakAwal: saldoAwal < -EPS_MUTASI,
+    kodeMirip: master.ada && !m ? kandidatNama(kode.trim(), _mutasiKodeMaster(ctx, mapping, config), 3) : [],
     tanda: tanda,
     ringkasCek: ringkasCek,
     baris: keluaran,
@@ -328,10 +323,10 @@ function jalankan(config, mapping, ctx) {
   var kunci = sumberDihitung(mapping);
   var kodeList = _mutasiDaftarKode(config.KODE_BARANG);
   if (mode === 'rekap' && config.KATEGORI) {
-    var masterKategori = _mutasiAmbilMaster(ctx.db, mapping, config.COMPANY_CODE, kodeList, config.KATEGORI);
+    var masterKategori = ambilMaster(ctx.db, mapping, config.COMPANY_CODE, kodeList, config.KATEGORI);
     kodeList = Object.keys(masterKategori.peta).sort();
   }
-  var master = _mutasiAmbilMaster(ctx.db, mapping, config.COMPANY_CODE, kodeList, null);
+  var master = ambilMaster(ctx.db, mapping, config.COMPANY_CODE, kodeList, null);
   if (mode === 'kartu') return _mutasiKartu(config, mapping, ctx, rentang, cutoff, kunci, kodeList, master);
   return _mutasiRekap(config, mapping, ctx, rentang, cutoff, kunci, kodeList, master);
 }
@@ -350,7 +345,7 @@ function _mutasiSatuan(satuan) {
 function _mutasiTeksMinus(m, tz) {
   if (!m) return '';
   return formatLokal(m.tanggal, tz).slice(0, 16) + ' | ' + m.asal + ' ' + m.arah + ' ' + _mutasiAngka(m.qty) +
-    ' | saldo ' + _mutasiAngka(m.saldo);
+    ' | saldo ' + _mutasiAngka(m.saldoSebelum) + ' -> ' + _mutasiAngka(m.saldo);
 }
 
 function _mutasiRenderRekap(h, ctx, config) {
@@ -424,15 +419,28 @@ function _mutasiRenderRekap(h, ctx, config) {
   if (dipotong) baris.push('... ditampilkan ' + maks + ' kode. Pakai FORMAT: "json" untuk daftar lengkap.');
 
   var adaMinus = [];
-  for (var k = 0; k < tampil.length; k++) if (tampil[k].minus) adaMinus.push(tampil[k]);
+  var mirip = [];
+  for (var k = 0; k < tampil.length; k++) {
+    if (tampil[k].minus) adaMinus.push(tampil[k]);
+    if (tampil[k].kodeMirip && tampil[k].kodeMirip.length) mirip.push(tampil[k]);
+  }
   if (adaMinus.length) {
     baris.push('');
-    baris.push('Transaksi pertama yang membuat saldo minus di periode ini:');
+    baris.push('Penyebab saldo minus di periode ini (transaksi yang mengubah saldo dari >= 0 menjadi minus):');
     for (var z = 0; z < adaMinus.length; z++) {
-      baris.push('  ' + adaMinus[z].kodeBarang + ' : ' + _mutasiTeksMinus(adaMinus[z].minus, ctx.tz) +
-        ' | saldo terendah ' + _mutasiAngka(adaMinus[z].minus.saldoMin) + ' (' + adaMinus[z].minus.barisMinus + ' baris minus)');
+      var mi = adaMinus[z].minus;
+      var penjelasan = mi.transisi
+        ? _mutasiTeksMinus(mi, ctx.tz)
+        : 'sudah minus sejak sebelum periode (saldo awal ' + _mutasiAngka(adaMinus[z].awal) + ')';
+      baris.push('  ' + adaMinus[z].kodeBarang + ' : ' + penjelasan + ' | terendah ' + _mutasiAngka(mi.saldoMin) +
+        ' (' + mi.barisMinus + ' baris minus)');
     }
     baris.push('Telusuri per transaksi dengan MODE: "kartu" dan KODE_BARANG berisi kode di atas.');
+  }
+  if (mirip.length) {
+    baris.push('');
+    baris.push('Kode yang tidak ada di master, dengan kode mirip di master (kemungkinan salah ketik):');
+    for (var y = 0; y < mirip.length; y++) baris.push('  ' + mirip[y].kodeBarang + ' -> ' + mirip[y].kodeMirip.join(', '));
   }
   return baris;
 }
@@ -445,7 +453,8 @@ function _mutasiRenderKartu(h, ctx) {
     var k = h.kartu[i];
     baris.push('');
     var judul = k.kodeBarang + (k.master ? ' | ' + (k.master.nama || '-') + ' | ' + (k.master.kategori || '-') +
-      ' | satuan master ' + (k.master.satuan || '-') : ' | (tidak ada di master)');
+      ' | satuan master ' + (k.master.satuan || '-')
+      : ' | (tidak ada di master' + (k.kodeMirip.length ? '; mirip: ' + k.kodeMirip.join(', ') : '') + ')');
     baris.push(new Array(4).join('=') + ' ' + judul + ' ' + new Array(Math.max(3, 74 - judul.length)).join('='));
     baris.push('Saldo awal (sebelum ' + h.periodeDari + '): ' + (_mutasiAngka(k.saldoAwal) + ' ' + _mutasiSatuan(k.satuan)).trim() +
       (k.tanda.length ? ' | tanda: ' + k.tanda.join(', ') : ''));
@@ -485,9 +494,10 @@ function _mutasiRenderKartu(h, ctx) {
     if (k.terpotong) baris.push('... dipotong di ' + k.jumlahBaris + ' baris (KARTU_MAKS_BARIS); saldo akhir di bawah dari rekap.');
     baris.push('Saldo akhir: ' + _mutasiAngka(k.saldoAkhir) + ' (masuk ' + _mutasiAngka(k.masuk) + ', keluar ' + _mutasiAngka(k.keluar) +
       ', ' + k.jumlahBaris + ' transaksi)');
+    if (k.minusSejakAwal) baris.push('Saldo sudah minus sejak sebelum periode (saldo awal ' + _mutasiAngka(k.saldoAwal) + ').');
     if (k.minusPertama) {
       var ds2 = k.minusPertama.dokSumber || {};
-      baris.push('Saldo pertama kali minus: ' + _mutasiTeksMinus(k.minusPertama, ctx.tz) + (ds2.noTransaksi ? ' | ' + ds2.noTransaksi : ''));
+      baris.push('Saldo berubah jadi minus: ' + _mutasiTeksMinus(k.minusPertama, ctx.tz) + (ds2.noTransaksi ? ' | ' + ds2.noTransaksi : ''));
     }
     var cek = [];
     for (var c in k.ringkasCek) cek.push(c + ' ' + k.ringkasCek[c]);

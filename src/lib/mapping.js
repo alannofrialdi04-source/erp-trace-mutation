@@ -17,7 +17,9 @@ var FIELD_OPSIONAL = [
 var ARAH_STATIS = ['IN', 'OUT', 'TANDA_QTY'];
 var KONVERSI_LINK = ['toObjectId', 'toString'];
 var KUNCI_SUMBER = ['label', 'koleksi', 'arah', 'kategori', 'hitungMutasi', 'filter', 'field', 'header', 'rujukan'];
-var KUNCI_MAPPING = ['meta', 'timezone', 'sumber', 'master'];
+var KUNCI_MAPPING = ['meta', 'timezone', 'sumber', 'master', 'opname'];
+var FIELD_OPNAME_WAJIB = ['kodeBarang', 'qty', 'tanggal'];
+var FIELD_OPNAME_OPSIONAL = ['companyCode', 'noReg', 'noBap', 'satuan', 'nama'];
 var FIELD_MASTER_WAJIB = ['kodeBarang'];
 var FIELD_MASTER_OPSIONAL = ['companyCode', 'nama', 'kategori', 'satuan'];
 var KUNCI_HEADER = ['koleksi', 'localField', 'foreignField', 'konversi', 'filter', 'field'];
@@ -120,6 +122,37 @@ function _validasiMaster(master, err, warn) {
   }
   for (var j = 0; j < FIELD_MASTER_WAJIB.length; j++) {
     if (!_teksIsi(master.field[FIELD_MASTER_WAJIB[j]])) err(p + '.field.' + FIELD_MASTER_WAJIB[j], 'wajib diisi');
+  }
+}
+
+function _validasiOpname(opname, err, warn) {
+  if (!_objekBiasa(opname) || Object.keys(opname).length === 0) {
+    err('opname', 'harus berupa objek { namaDokumen: { koleksi, field } } yang tidak kosong');
+    return;
+  }
+  var kunci = Object.keys(opname);
+  var dikenal = FIELD_OPNAME_WAJIB.concat(FIELD_OPNAME_OPSIONAL);
+  for (var i = 0; i < kunci.length; i++) {
+    var p = 'opname.' + kunci[i];
+    var o = opname[kunci[i]];
+    if (!_objekBiasa(o)) {
+      err(p, 'harus berupa objek { label, koleksi, field }');
+      continue;
+    }
+    _kunciAsing(p, o, ['label', 'koleksi', 'field'], warn);
+    if (!_teksIsi(o.koleksi)) err(p + '.koleksi', 'wajib diisi nama koleksi');
+    if (!_objekBiasa(o.field)) {
+      err(p + '.field', 'wajib berupa objek { kodeBarang, qty, tanggal, ... }');
+      continue;
+    }
+    var kf = Object.keys(o.field);
+    for (var j = 0; j < kf.length; j++) {
+      if (dikenal.indexOf(kf[j]) < 0) warn(p + '.field.' + kf[j], 'field opname tidak dikenal. Yang dikenal: ' + dikenal.join(', '));
+      else if (!_teksIsi(o.field[kf[j]])) err(p + '.field.' + kf[j], 'harus berupa nama field (teks)');
+    }
+    for (var w = 0; w < FIELD_OPNAME_WAJIB.length; w++) {
+      if (!_teksIsi(o.field[FIELD_OPNAME_WAJIB[w]])) err(p + '.field.' + FIELD_OPNAME_WAJIB[w], 'wajib diisi');
+    }
   }
 }
 
@@ -299,6 +332,7 @@ function validasiMapping(mapping) {
   for (var i = 0; i < kunci.length; i++) _validasiSumber(kunci[i], mapping.sumber[kunci[i]], err, warn);
   _validasiRujukan(mapping, err);
   if (mapping.master !== undefined && mapping.master !== null) _validasiMaster(mapping.master, err, warn);
+  if (mapping.opname !== undefined && mapping.opname !== null) _validasiOpname(mapping.opname, err, warn);
   return { error: error, peringatan: peringatan };
 }
 

@@ -37,6 +37,7 @@ test('tahapRekap & tahapMinus memakai batas periode dan cut-off', () => {
   assert.ok(!JSON.stringify(m.tahapRekap(r, null)).includes('2025-08-17'));
   const minus = m.tahapMinus(r);
   assert.ok(minus.some((s) => s.$setWindowFields && s.$setWindowFields.partitionBy === '$kodeBarang'));
+  assert.ok(JSON.stringify(minus).includes('"$shift"'), 'saldo sebelum baris dihitung dengan $shift (transisi ke minus)');
 });
 
 test('pivotRekap: saldo awal/masuk/keluar/akhir, per asal, bucket khusus', () => {

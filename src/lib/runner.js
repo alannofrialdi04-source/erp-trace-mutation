@@ -42,6 +42,39 @@ function angkaSampel(nilai, nama) {
   return n;
 }
 
+/**
+ * Master barang (MAPPING.master) untuk companyCode tertentu.
+ * Hasil: { ada: bool, peta: { kodeTrim: { nama, kategori, satuan, ganda } } }
+ */
+function ambilMaster(d, mapping, companyCode, kodeList, kategori) {
+  var master = mapping.master;
+  if (!master) {
+    if (kategori) throw new Error('CONFIG.KATEGORI butuh MAPPING.master');
+    return { ada: false, peta: {} };
+  }
+  var f = master.field;
+  var match = {};
+  if (companyCode && f.companyCode) match[f.companyCode] = companyCode;
+  if (kodeList) match[f.kodeBarang] = { $in: kodeList };
+  if (kategori) {
+    if (!f.kategori) throw new Error('CONFIG.KATEGORI butuh MAPPING.master.field.kategori');
+    match[f.kategori] = kategori;
+  }
+  var proyeksi = { _id: 0, kode: '$' + f.kodeBarang };
+  proyeksi.nama = f.nama ? { $ifNull: ['$' + f.nama, null] } : { $literal: null };
+  proyeksi.kategori = f.kategori ? { $ifNull: ['$' + f.kategori, null] } : { $literal: null };
+  proyeksi.satuan = f.satuan ? { $ifNull: ['$' + f.satuan, null] } : { $literal: null };
+  var baris = jalankanAgregasi(d, master.koleksi, [{ $match: match }, { $project: proyeksi }]);
+  var peta = {};
+  for (var i = 0; i < baris.length; i++) {
+    if (typeof baris[i].kode !== 'string') continue;
+    var k = baris[i].kode.trim();
+    if (peta[k]) peta[k].ganda++;
+    else peta[k] = { nama: baris[i].nama, kategori: baris[i].kategori, satuan: baris[i].satuan, ganda: 0 };
+  }
+  return { ada: true, peta: peta };
+}
+
 function _versiServer(d) {
   try {
     return d.version();

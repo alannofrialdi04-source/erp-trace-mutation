@@ -26,7 +26,8 @@ test('rekap: saldo awal, masuk, keluar, saldo akhir per kode (batas periode WIB)
   assert.equal(hasil.periode, '2026-01-01 s/d 2026-01-31 (WIB)');
   assert.deepEqual(hasil.sumberDihitung, ['stok']);
   const k = perKode(hasil);
-  assert.deepEqual(Object.keys(k).sort(), ['CT-001', 'DS-MAT-001', 'FG-001', 'MAT-001', 'MAT-002', 'MAT-003', 'S001', 'SHI']);
+  assert.deepEqual(Object.keys(k).sort(),
+    ['CT-001', 'DS-MAT-001', 'FG-0001', 'FG-001', 'MAT-001', 'MAT-002', 'MAT-003', 'MAT-004', 'MAT-005', 'S001', 'SHI']);
 
   const a = k['MAT-001'];
   assert.deepEqual([a.awal, a.masuk, a.keluar, a.akhir], [100, 60, 145, 15], 'baris NGI tidak ikut, 23:59:59 WIB 31 Jan ikut, 00:00 WIB 1 Feb tidak');
@@ -56,20 +57,33 @@ test('rekap: tanda masalah & transaksi pertama penyebab minus', () => {
   assert.deepEqual(k['DS-MAT-001'].tanda, []);
 
   assert.equal(k['MAT-001'].minus.tanggal, '2026-01-10T02:00:00.000Z');
+  assert.equal(k['MAT-001'].minus.transisi, true);
+  assert.equal(k['MAT-001'].minus.saldoSebelum, 20);
   assert.equal(k['MAT-001'].minus.saldo, -30);
   assert.equal(k['MAT-001'].minus.asal, 'MATERIALOUT');
   assert.equal(k['FG-001'].minus.tanggal, '2026-01-20T05:00:00.000Z', 'saldo tepat 0 bukan minus');
 
-  assert.deepEqual(hasil.ringkasan.tanda, { MINUS: 3, TIDAK_DI_MASTER: 1, PERNAH_MINUS: 1, SATUAN_CAMPUR: 1, SEBELUM_CUTOFF: 1 });
-  assert.deepEqual(hasil.kode.map((x) => x.kodeBarang), ['FG-001', 'MAT-002', 'SHI', 'MAT-001', 'MAT-003', 'CT-001', 'DS-MAT-001', 'S001'],
+  assert.deepEqual(k['MAT-004'].tanda, ['MINUS', 'AWAL_MINUS']);
+  assert.equal(k['MAT-004'].minus.transisi, true, 'IN yang masih minus bukan penyebab; transisi ada di OUT 20');
+  assert.deepEqual([k['MAT-004'].minus.saldoSebelum, k['MAT-004'].minus.saldo, k['MAT-004'].minus.qty], [7, -13, 20]);
+  assert.equal(k['MAT-004'].minus.barisMinus, 2);
+  assert.equal(k['MAT-005'].minus.transisi, false, 'minus sejak sebelum periode');
+  assert.deepEqual([k['MAT-005'].minus.saldoMin, k['MAT-005'].minus.barisMinus], [-3, 1]);
+  assert.deepEqual(k['FG-0001'].tanda, ['MINUS', 'TIDAK_DI_MASTER']);
+  assert.deepEqual(k['FG-0001'].kodeMirip, ['FG-001']);
+  assert.deepEqual(k.SHI.kodeMirip, []);
+
+  assert.deepEqual(hasil.ringkasan.tanda, { MINUS: 6, AWAL_MINUS: 2, TIDAK_DI_MASTER: 2, PERNAH_MINUS: 1, SATUAN_CAMPUR: 1, SEBELUM_CUTOFF: 1 });
+  assert.deepEqual(hasil.kode.map((x) => x.kodeBarang),
+    ['FG-0001', 'FG-001', 'MAT-002', 'MAT-004', 'MAT-005', 'SHI', 'MAT-001', 'MAT-003', 'CT-001', 'DS-MAT-001', 'S001'],
     'urut: tanda terberat dulu');
-  assert.deepEqual(hasil.ringkasan.perAsal.DELIVERY, { masuk: 0, keluar: 515, dok: 6 });
-  assert.deepEqual(hasil.ringkasan.perAsal.INCOMING, { masuk: 1070, keluar: 0, dok: 3 });
+  assert.deepEqual(hasil.ringkasan.perAsal.DELIVERY, { masuk: 0, keluar: 518, dok: 7 });
+  assert.deepEqual(hasil.ringkasan.perAsal.INCOMING, { masuk: 1084, keluar: 0, dok: 6 });
 });
 
 test('rekap: filter KATEGORI dari master & KODE_BARANG', () => {
   const kat = mutasi({ KATEGORI: 'MATERIAL' });
-  assert.deepEqual(kat.kode.map((x) => x.kodeBarang).sort(), ['DS-MAT-001', 'MAT-001', 'MAT-002', 'MAT-003']);
+  assert.deepEqual(kat.kode.map((x) => x.kodeBarang).sort(), ['DS-MAT-001', 'MAT-001', 'MAT-002', 'MAT-003', 'MAT-004', 'MAT-005']);
   const satu = mutasi({ KODE_BARANG: 'MAT-002' });
   assert.deepEqual(satu.kode.map((x) => x.kodeBarang), ['MAT-002']);
   const kosong = mutasi({ KATEGORI: 'TIDAK ADA' });
@@ -102,6 +116,19 @@ test('kartu: saldo berjalan, minus pertama, dan cek tiap baris ke dokumen sumber
   assert.deepEqual(tidak.tanda, ['TIDAK_DI_MASTER']);
 });
 
+test('kartu: transisi ke minus, minus sejak sebelum periode, kode mirip', () => {
+  const [m4, m5, fg] = mutasi({ MODE: 'kartu', KODE_BARANG: ['MAT-004', 'MAT-005', 'FG-0001'] }).kartu;
+  assert.deepEqual(m4.baris.map((b) => b.saldo), [-3, 7, -13]);
+  assert.equal(m4.minusSejakAwal, true);
+  assert.deepEqual([m4.minusPertama.saldoSebelum, m4.minusPertama.saldo], [7, -13]);
+  assert.equal(m4.minusPertama.dokSumber.noTransaksi, 'OUTWH20260104-00002');
+  assert.equal(m5.minusSejakAwal, true);
+  assert.equal(m5.minusPertama, null, 'tidak ada transisi di periode');
+  assert.deepEqual(m5.tanda, ['MINUS', 'AWAL_MINUS']);
+  assert.deepEqual(fg.kodeMirip, ['FG-001']);
+  assert.deepEqual(fg.tanda, ['MINUS', 'TIDAK_DI_MASTER']);
+});
+
 test('kartu: KARTU_MAKS_BARIS memotong baris, saldo akhir tetap dari rekap', () => {
   const hasil = mutasi({ MODE: 'kartu', KODE_BARANG: 'MAT-001', KARTU_MAKS_BARIS: 2 });
   const k = hasil.kartu[0];
@@ -113,8 +140,10 @@ test('kartu: KARTU_MAKS_BARIS memotong baris, saldo akhir tetap dari rekap', () 
 
 test('format teks rekap & kartu', () => {
   const rekap = h.jalankanTool('01-mutasi', DB, { CONFIG: { PERIODE: '2026-01', HANYA_BERMASALAH: true } }).stdout;
-  assert.match(rekap, /Ringkasan: 8 kode bergerak \| MINUS 3 \| PERNAH_MINUS 1 \| TIDAK_DI_MASTER 1 \| SATUAN_CAMPUR 1 \| SEBELUM_CUTOFF 1/);
-  assert.match(rekap, /MAT-001 : 2026-01-10 09:00 \| MATERIALOUT OUT 50 \| saldo -30/);
+  assert.match(rekap, /Ringkasan: 11 kode bergerak \| MINUS 6 \| AWAL_MINUS 2 \| PERNAH_MINUS 1 \| TIDAK_DI_MASTER 2 \| SATUAN_CAMPUR 1 \| SEBELUM_CUTOFF 1/);
+  assert.match(rekap, /MAT-001 : 2026-01-10 09:00 \| MATERIALOUT OUT 50 \| saldo 20 -> -30/);
+  assert.match(rekap, /MAT-005 : sudah minus sejak sebelum periode \(saldo awal -5\)/);
+  assert.match(rekap, /FG-0001 -> FG-001/);
   assert.doesNotMatch(rekap, /DS-MAT-001/, 'HANYA_BERMASALAH menyembunyikan kode tanpa tanda');
   const kartu = h.jalankanTool('01-mutasi', DB, { CONFIG: { PERIODE: '2026-01', MODE: 'kartu', KODE_BARANG: 'FG-001' } }).stdout;
   assert.match(kartu, /OUT20260116-00001\s+BC 30\s+120\s+30\s+PCE\s+QTY_BEDA/);

@@ -105,28 +105,41 @@ function tahapRekap(rentang, cutoff) {
 }
 
 /**
- * Tahap agregasi saldo berjalan per kode ($setWindowFields, MongoDB 5.0+).
- * Hasil hanya untuk kode yang saldonya pernah minus DI DALAM periode:
- *   { _id: kode, tanggal, saldo, asal, arah, qty, docId, idAsal } = baris pertama yang membuat minus
- *   + saldoMin, barisMinus
+ * Tahap agregasi saldo berjalan per kode ($setWindowFields + $shift, MongoDB 5.0+).
+ * Hasil hanya untuk kode yang saldonya minus di salah satu baris DI DALAM periode:
+ *   transisi = true  -> baris pertama di periode yang membuat saldo berubah dari >= 0 menjadi minus
+ *   transisi = false -> tidak ada transisi di periode: saldo sudah minus sejak sebelum periode;
+ *                       baris yang dikembalikan = baris minus pertama di periode
+ *   + saldoMin, barisMinus (jumlah baris dengan saldo minus di periode)
  */
 function tahapMinus(rentang) {
+  var urut = { tanggal: 1, urutArah: 1, docId: 1 };
   return [
     { $match: { tanggalTipe: 'date', tanggal: { $lt: rentang.lt } } },
     {
       $setWindowFields: {
         partitionBy: '$kodeBarang',
-        sortBy: { tanggal: 1, urutArah: 1, docId: 1 },
+        sortBy: urut,
         output: { __saldo: { $sum: '$qtyBertanda', window: { documents: ['unbounded', 'current'] } } },
       },
     },
+    {
+      $setWindowFields: {
+        partitionBy: '$kodeBarang',
+        sortBy: urut,
+        output: { __sebelum: { $shift: { output: '$__saldo', by: -1, default: 0 } } },
+      },
+    },
     { $match: { tanggal: { $gte: rentang.gte }, __saldo: { $lt: -EPS_MUTASI } } },
-    { $sort: { kodeBarang: 1, tanggal: 1, urutArah: 1, docId: 1 } },
+    { $addFields: { __transisi: { $gte: ['$__sebelum', -EPS_MUTASI] } } },
+    { $sort: { kodeBarang: 1, __transisi: -1, tanggal: 1, urutArah: 1, docId: 1 } },
     {
       $group: {
         _id: '$kodeBarang',
+        transisi: { $first: '$__transisi' },
         tanggal: { $first: '$tanggal' },
         saldo: { $first: '$__saldo' },
+        saldoSebelum: { $first: '$__sebelum' },
         asal: { $first: '$asal' },
         arah: { $first: '$arah' },
         qty: { $first: '$qty' },

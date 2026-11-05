@@ -51,6 +51,18 @@ test('properti level atas yang salah ketik -> peringatan', () => {
   assert.deepEqual(validasiMapping(m).peringatan.map((p) => p.path), ['mapping.mastr']);
 });
 
+test('opname: kodeBarang/qty/tanggal wajib', () => {
+  const m = salin(require('../../config/mapping'));
+  delete m.opname.monsus.field.qty;
+  m.opname.monsus.field.lokasi = 'x';
+  const hasil = validasiMapping(m);
+  assert.deepEqual(hasil.error.map((e) => e.path), ['opname.monsus.field.qty']);
+  assert.deepEqual(hasil.peringatan.map((p) => p.path), ['opname.monsus.field.lokasi']);
+  const m2 = salin(require('../../config/mapping'));
+  m2.opname = {};
+  assert.deepEqual(pathError(validasiMapping(m2)), ['opname']);
+});
+
 test('sumberRujukan: kunci ASAL:ARAH didahulukan', () => {
   const s = require('../../config/mapping').sumber.stok;
   assert.equal(sumberRujukan(s, 'DEADSTOK', 'OUT'), 'deadstokKeluar');

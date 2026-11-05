@@ -35,6 +35,10 @@
  *
  * MASTER BARANG
  *   master.field : kodeBarang (wajib), companyCode, nama, kategori, satuan
+ *
+ * DOKUMEN HITUNG FISIK (opname)
+ *   opname.<nama>.field : kodeBarang, qty, tanggal (wajib), companyCode, noReg, noBap, satuan, nama
+ *   MONSUS = monitoring khusus Bea Cukai, setara hasil opname tahunan.
  */
 module.exports = {
   meta: {
@@ -54,6 +58,37 @@ module.exports = {
       nama: 'namaBarang',
       kategori: 'jenisBc', // MATERIAL | BARANG SETENGAH JADI | BARANG JADI | MESIN | SCRAP
       satuan: 'satuan',
+    },
+  },
+
+  // Dokumen hitung fisik untuk rekonsiliasi (02-rekon-opname)
+  opname: {
+    monsus: {
+      label: 'Monitoring khusus Bea Cukai (hasil opname)',
+      koleksi: 'tbl_monsusdetail',
+      field: {
+        kodeBarang: 'kodeBarang',
+        qty: 'qty',
+        tanggal: 'tanggal', // 23:59:59 WIB tanggal opname
+        companyCode: 'companyCode',
+        noReg: 'noReg',
+        noBap: 'noBap',
+        satuan: 'satuan',
+        nama: 'namaBarang',
+      },
+    },
+    stokopname: {
+      label: 'Stock opname',
+      koleksi: 'tbl_stokopnamedetail',
+      field: {
+        kodeBarang: 'kodeBarang',
+        qty: 'qtyOpname',
+        tanggal: 'tglOpname',
+        companyCode: 'companyCode',
+        noReg: 'noReg',
+        noBap: 'noBap',
+        nama: 'namaBarang',
+      },
     },
   },
 
