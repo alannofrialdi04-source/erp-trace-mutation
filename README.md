@@ -2,33 +2,37 @@
 
 Kumpulan script **mongosh read-only** untuk menelusuri mutasi stok ERP Kawasan Berikat / IT Inventory.
 
-Transaksi dari banyak modul (Incoming, Material Out, Delivery, Production, Stock Adjustment, dan lainnya) disatukan menjadi satu **aliran mutasi** dengan bentuk seragam:
+Semua sumber mutasi dibaca lewat **mapping**, lalu dinormalisasi jadi satu bentuk baris yang seragam. Untuk database `erpgarment`, mutasi dihitung dari ledger aplikasi `tbl_stok`. Setiap baris ledger bisa ditelusuri ke dokumen sumbernya lewat `idAsal`:
 
 ```text
-tbl_incomingdetail ──────┐
-tbl_materialkeluardetail ┤
-tbl_deliverydetail ──────┤→ normalisasi → { sumber, tanggal, companyCode, kodeBarang,
-tbl_productiondetail ────┤                 qty, arah: IN/OUT, idAsal, noAju, noReg, ... }
-tbl_stokpenyesuaian... ──┘                              ↓
-                                  kartu stok · duplikat · data yatim · anomali
+tbl_stok (ledger: asal, jenis IN/OUT, qty, tanggal, idAsal)
+   │  dihitung: saldo awal + masuk − keluar = saldo akhir
+   │
+   └─ idAsal per asal ──► INCOMING     tbl_incomingdetail      (GRN…)
+                          MATERIALOUT  tbl_materialkeluardetail (OUTWH…)
+                          DELIVERY     tbl_deliverydetail       (OUT…)
+                          PRODUCTION   tbl_productiondetail     (PRD…, hasil)
+                          TRANSFER     tbl_transferproduction   (TRF…)
+                          DEADSTOK     tbl_deadstokdetail
+                          SCRAP        exim_scrapdetail / exim_scrapexbc
 ```
 
-Saldo dihitung dengan model `Saldo Akhir = Saldo Awal + Pemasukan − Pengeluaran ± Penyesuaian`, lalu ditelusuri sampai ke transaksi yang menyebabkan selisih.
+Saldo dihitung dengan model `Saldo Akhir = Saldo Awal + Pemasukan − Pengeluaran`. Kode yang saldonya minus ditelusuri sampai ke transaksi pertama yang membuatnya minus, beserta kecocokan baris ledger dengan dokumen sumbernya.
 
 ---
 
 ## Status
 
-Versi **0.2.0**: Fase 1 sedang berjalan.
+Versi **0.3.0**: Fase 1 selesai.
 
 | Fase | Isi | Status |
 |---|---|---|
 | 0 | Engine normalisasi berbasis mapping, helper periode WIB, build, test, tool `00-profil-skema` dan `00-cek-mapping` | Selesai |
-| 1 | `00-peta-data` (distribusi nilai kunci + relasi `idAsal`), mapping sesuai data asli, `01-mutasi` (saldo awal, IN, OUT, penyesuaian, saldo akhir, kartu stok dengan saldo berjalan) | Berjalan: `00-peta-data` selesai, mapping menunggu hasilnya |
+| 1 | `00-peta-data` (distribusi nilai kunci + relasi `idAsal`), mapping `erpgarment` berbasis ledger `tbl_stok`, `01-mutasi` (rekap saldo per kode + kartu stok dengan saldo berjalan dan cek per baris ke dokumen sumber) | Selesai |
 | 2 | `02-duplikat`, `03-orphan` (termasuk counter lot `qtyOut`/`qtyBalance` vs transaksi OUT), `04-anomali` | Belum |
 | 3 | `05-cross-module` (termasuk ledger `tbl_stok` vs transaksi sumber, header `listDetail` vs koleksi detail), template koreksi data yang aman, CI | Belum |
 
-> **Mapping masih berstatus ASUMSI.** Struktur database `erpgarment` sudah diketahui dari profil schema, tetapi arti beberapa field (qty mana yang dipakai, arah penyesuaian, status yang dihitung) masih diverifikasi lewat `00-peta-data`. Jangan pakai hasil `00-cek-mapping` untuk mengambil keputusan sebelum mapping berstatus TERVERIFIKASI.
+> **Dasar mapping.** Nama koleksi & field diverifikasi dengan profil schema dan `00-peta-data` (2026-11-05). Jumlah dokumen dan total qty `tbl_stok` sama persis dengan transaksi sumber untuk MATERIALOUT, DELIVERY, PRODUCTION, TRANSFER, DEADSTOK, dan SCRAP; INCOMING selisih 10 dokumen. Satu hal yang masih asumsi: ledger INCOMING diasumsikan memakai `qtyWh`. Kalau salah, kolom CEK kartu stok akan menunjukkan `QTY_BEDA` pada baris INCOMING.
 
 ---
 
@@ -74,7 +78,7 @@ mkdir -p hasil
 mongosh "mongodb://..." --quiet --file dist/00-profil-skema.js > hasil/profil-skema.txt
 ```
 
-Lingkungan yang sudah dites: mongosh 2.14 dengan MongoDB 7.0. Operator yang dipakai (`$convert`, `$trim`, `$lookup`, `$type`) tersedia sejak MongoDB 4.0, tetapi versi di bawah 7.0 dan shell GUI (Studio 3T, NoSQLBooster, Compass) **belum dites**.
+Lingkungan yang sudah dites: mongosh 2.14 dengan MongoDB 7.0 (test) dan MongoDB 8.0.1 (`erpgarment`, tool `00-*`). `01-mutasi` butuh **MongoDB 5.0+** (`$setWindowFields`, `$unionWith`); tool `00-*` memakai operator yang tersedia sejak 4.0. Shell GUI (Studio 3T, NoSQLBooster, Compass) **belum dites**.
 
 ### Alur verifikasi mapping
 
@@ -234,39 +238,123 @@ tbl_materialkeluardetail.idAsal | sampel 3 nilai (format hex ObjectId 100%)
     tidak ditemukan di mana pun         1  33,3%
 ```
 
+### `01-mutasi`: rekap mutasi & kartu stok
+
+Menghitung mutasi dari sumber yang `hitungMutasi`-nya tidak `false` (untuk `erpgarment`: ledger `tbl_stok`).
+
+- **Saldo awal** adalah akumulasi semua transaksi **sebelum** periode. Tidak ada tabel saldo awal terpisah. Cut-off 18 Agustus 2025 (stock opname mesin) sudah tercatat sebagai transaksi INCOMING `SALDO AWAL`.
+- **Masuk/keluar** adalah transaksi **di dalam** periode, dengan batas WIB dan batas atas eksklusif.
+
+**Mode `rekap`:** satu baris per kode barang berisi saldo awal, masuk, keluar, saldo akhir, satuan, dan tanda masalah. Disertai mutasi per asal (INCOMING, MATERIALOUT, DELIVERY, …) dan, untuk kode yang saldonya pernah minus, **transaksi pertama yang membuat saldo minus** (dihitung dengan saldo berjalan per kode).
+
+**Mode `kartu`:** semua transaksi satu atau beberapa kode (maks 20) dengan saldo berjalan. Setiap baris ledger dicocokkan ke dokumen sumbernya lewat `idAsal` (`CEK_SUMBER`), dan ditampilkan nomor transaksinya (GRN…/OUTWH…/OUT…/PRD…/TRF…) serta jenis dokumen BC.
+
+| CONFIG | Default | Keterangan |
+|---|---|---|
+| `MODE` | `'rekap'` | `'rekap'` atau `'kartu'` |
+| `COMPANY_CODE` | `'WAG'` | Filter companyCode. Satu DB berisi beberapa company, jadi sebaiknya selalu diisi |
+| `PERIODE` | `'2026-01'` | `'2026-01'`, `'2026'`, `'2026-01-15'`, atau `{ dari, sampai }` |
+| `KODE_BARANG` | `null` | `'ABC'` atau `['ABC', 'DEF']`. Wajib untuk mode `kartu` |
+| `KATEGORI` | `null` | Rekap per kategori master (`jenisBc`): `'MATERIAL'`, `'BARANG SETENGAH JADI'`, `'BARANG JADI'`, `'MESIN'`, `'SCRAP'` |
+| `TANGGAL_CUTOFF` | `'2025-08-18'` | Transaksi sebelum tanggal ini diberi tanda `SEBELUM_CUTOFF` (tetap dihitung) |
+| `HANYA_BERMASALAH` | `false` | Rekap: tampilkan hanya kode yang punya tanda |
+| `TAMPIL_MAKS` | `200` | Rekap: baris maksimal di output teks (`FORMAT: 'json'` selalu lengkap) |
+| `KARTU_MAKS_BARIS` | `2000` | Kartu: baris maksimal per kode |
+| `CEK_SUMBER` | `true` | Kartu: cocokkan tiap baris ledger dengan dokumen sumbernya |
+
+Tanda di rekap (urut dari yang paling berat):
+
+| Tanda | Arti |
+|---|---|
+| `MINUS` | Saldo akhir minus |
+| `AWAL_MINUS` | Saldo awal sudah minus |
+| `PERNAH_MINUS` | Saldo akhir tidak minus, tetapi sempat minus di dalam periode |
+| `TIDAK_DI_MASTER` | Kode tidak ada di master barang (`tbl_barang`) untuk companyCode tersebut |
+| `SATUAN_CAMPUR` | Baris kode ini memakai lebih dari satu satuan. Qty dijumlah apa adanya **tanpa konversi** |
+| `SEBELUM_CUTOFF` | Ada transaksi bertanggal sebelum `TANGGAL_CUTOFF` |
+| `ARAH_TIDAK_DIKENAL`, `QTY_KOSONG`, `TANPA_TANGGAL` | Arah, qty, atau tanggal baris tidak terbaca (tidak ikut saldo) |
+
+Kolom CEK di kartu stok:
+
+| Kode | Arti |
+|---|---|
+| `OK` | Baris ledger cocok dengan dokumen sumbernya |
+| `SUMBER_HILANG` | `idAsal` menunjuk dokumen yang tidak ada (hard delete atau id salah) |
+| `SUMBER_DIHAPUS` | Dokumen sumber `isDeleted: true`, tetapi baris ledger masih dihitung |
+| `QTY_BEDA` | qty ledger ≠ qty dokumen sumber (qty sumber ada di JSON `dokSumber.qty`) |
+| `KODE_BEDA` / `ARAH_BEDA` | Kode barang / arah ledger ≠ dokumen sumber |
+| `TANGGAL_BEDA` | Tanggal (WIB) ledger ≠ tanggal dokumen sumber |
+| `SATUAN_BEDA` | Satuan ledger ≠ satuan dokumen sumber |
+| `RUJUKAN_TIDAK_ADA`, `ID_ASAL_KOSONG`, `ID_ASAL_TIDAK_VALID` | Baris tidak bisa ditelusuri |
+
+Contoh (data dummy dari test):
+
+```bash
+mongosh "mongodb://..." --quiet --eval 'var __TRACE_OVERRIDE__ = { CONFIG: { PERIODE: "2026-01", HANYA_BERMASALAH: true, KODE_BARANG: ["FG-001", "MAT-001"] } }' --file dist/01-mutasi.js
+```
+
+```text
+KODE     NAMA    KATEGORI     SAT  SALDO AWAL  MASUK  KELUAR  SALDO AKHIR  TANDA
+-------  ------  -----------  ---  ----------  -----  ------  -----------  ------------
+FG-001   KAOS    BARANG JADI  PCE           0    500     510          -10  MINUS
+MAT-001  KAIN A  MATERIAL     YRD         100     60     145           15  PERNAH_MINUS
+
+Transaksi pertama yang membuat saldo minus di periode ini:
+  FG-001 : 2026-01-20 12:00 | DELIVERY OUT 10 | saldo -10 | saldo terendah -10 (1 baris minus)
+  MAT-001 : 2026-01-10 09:00 | MATERIALOUT OUT 50 | saldo -30 | saldo terendah -30 (1 baris minus)
+Telusuri per transaksi dengan MODE: "kartu" dan KODE_BARANG berisi kode di atas.
+```
+
+```bash
+mongosh "mongodb://..." --quiet --eval 'var __TRACE_OVERRIDE__ = { CONFIG: { MODE: "kartu", PERIODE: "2026-01", KODE_BARANG: "FG-001" } }' --file dist/01-mutasi.js
+```
+
+```text
+TANGGAL (WIB)     ASAL        PROSES       NO. TRANSAKSI                 DOK    MASUK  KELUAR  SALDO  SAT  CEK
+----------------  ----------  -----------  ----------------------------  -----  -----  ------  -----  ---  --------------
+2026-01-08 12:00  PRODUCTION  FINISHGOODS  PRDFINISHGOODS20260108-00001  BC 40    500            500  PCE  OK
+2026-01-12 12:00  DELIVERY                 OUT20260112-00001             BC 30            200    300  PCE  OK
+2026-01-14 12:00  DELIVERY                 OUT20260114-00001             BC 30            150    150  PCE  SUMBER_DIHAPUS
+2026-01-16 12:00  DELIVERY                 OUT20260116-00001             BC 30            120     30  PCE  QTY_BEDA
+2026-01-18 12:00  DELIVERY                                                                 30      0  PCE  SUMBER_HILANG
+2026-01-20 12:00  DELIVERY                 OUT20260125-00001             BC 30             10    -10  PCE  TANGGAL_BEDA
+Saldo akhir: -10 (masuk 500, keluar 510, 6 transaksi)
+Saldo pertama kali minus: 2026-01-20 12:00 | DELIVERY OUT 10 | saldo -10 | OUT20260125-00001
+```
+
 ---
 
 ## Mapping (`config/mapping.js`)
 
-Semua nama koleksi dan field ditulis di satu file ini. Tool tidak meng-hardcode nama field. Format lengkapnya dijelaskan di komentar bagian atas file. Ringkasnya:
+Semua nama koleksi dan field ditulis di satu file ini. Tool tidak meng-hardcode nama field. Format lengkapnya dijelaskan di komentar bagian atas file. Ringkasnya (potongan mapping `erpgarment`):
 
 ```js
+master: {
+  koleksi: 'tbl_barang',
+  field: { kodeBarang: 'kodeBarang', companyCode: 'companyCode', nama: 'namaBarang', kategori: 'jenisBc', satuan: 'satuan' },
+},
 sumber: {
-  incoming: {
-    label: 'Incoming Warehouse',
-    koleksi: 'tbl_incomingdetail',
-    arah: 'IN',                    // 'IN' | 'OUT' | 'TANDA_QTY' | { field, dari, nilai }
-    kategori: 'BB',
-    hitungMutasi: true,            // false = tidak ikut dihitung di saldo
-    filter: { isDeleted: { $ne: true } },
-    field: { tanggal: 'tanggal', companyCode: 'companyCode', kodeBarang: 'kodeBarang', qty: 'qty', idAsal: 'idAsal' },
+  stok: {                                   // dihitung (hitungMutasi default true)
+    koleksi: 'tbl_stok',
+    arah: { field: 'jenis', nilai: { IN: 'IN', OUT: 'OUT' } },
+    field: { tanggal: 'tanggal', companyCode: 'companyCode', kodeBarang: 'kodeBarang', qty: 'qty',
+             satuan: 'satuan', idAsal: 'idAsal', asal: 'asal', proses: 'namaProses' },
+    rujukan: { MATERIALOUT: 'materialKeluar', 'DEADSTOK:OUT': 'deadstokKeluar', /* ... */ },
   },
-  penyesuaian: {
-    koleksi: 'tbl_stokpenyesuaiandetail',
-    arah: { field: 'jenis', nilai: { TAMBAH: 'IN', KURANG: 'OUT' } },   // dibandingkan setelah trim + huruf besar
-    field: { kodeBarang: 'kodeBarang', qty: 'qty' },
-    header: {                      // field yang ada di koleksi header
-      koleksi: 'tbl_stokpenyesuaianheader',
-      localField: 'idHeader', foreignField: '_id',
-      konversi: 'toObjectId',      // idHeader string -> ObjectId
-      field: { tanggal: 'tanggal', companyCode: 'companyCode', noTransaksi: 'noDokumen' },
-    },
+  materialKeluar: {                         // hanya untuk penelusuran
+    koleksi: 'tbl_materialkeluardetail',
+    arah: 'OUT',
+    hitungMutasi: false,
+    field: { tanggal: 'tglKeluar', companyCode: 'companyCode', kodeBarang: 'kodeMaterial', qty: 'qtyKeluarOk',
+             satuan: 'satuanKeluarOk', noTransaksi: 'noReg', idAsal: 'idAsal', dihapus: 'isDeleted' },
   },
 }
 ```
 
 - **Field logis wajib:** `tanggal`, `companyCode`, `kodeBarang`, `qty`
-- **Field logis opsional:** `noTransaksi`, `idAsal`, `idDokumen`, `noAju`, `noReg`, `noUrut`, `jenisDokumen`, `satuan`, `gudang`, `createdAt`
+- **Field logis opsional:** `noTransaksi`, `idAsal`, `idDokumen`, `noAju`, `noReg`, `noUrut`, `jenisDokumen`, `satuan`, `gudang`, `createdAt`, `asal`, `proses`, `dihapus`
+- **`rujukan`:** baris dengan `asal` X dicari dokumen sumbernya di sumber `rujukan[X]` lewat `_id = idAsal`. Kunci `'ASAL:ARAH'` (mis. `'DEADSTOK:OUT'`) didahulukan dari `'ASAL'`.
+- **Arah dari field** dibandingkan setelah trim + huruf besar. Sumber yang field-nya ada di koleksi header bisa memakai `header: { koleksi, localField, foreignField, konversi, field }`.
 
 **Periode selalu dihitung dalam WIB** (`timezone: '+07:00'`) dengan batas atas eksklusif. Contoh November 2026:
 
@@ -315,7 +403,8 @@ MONGOSH_BIN=mongosh MONGO_URI_DASAR=mongodb://localhost:27018 npm run test:integ
 ```text
 config/mapping.js       mapping koleksi & field (satu-satunya yang disesuaikan per ERP)
 src/lib/                tanggal (WIB), teks (pola/kandidat), tabel, bson, mapping (validasi),
-                        sumber (pipeline normalisasi), runner (lapisan mongosh)
+                        sumber (pipeline normalisasi), mutasi (rekap, saldo berjalan, cek sumber),
+                        runner (lapisan mongosh)
 src/tools/              satu file per tool: blok CONFIG + jalankan() + render()
 scripts/build.js        gabungkan CONFIG + MAPPING + lib + tool -> dist/<tool>.js
 dist/                   hasil build, siap dijalankan (ikut di-commit)
@@ -343,4 +432,7 @@ Script dijalankan di mongosh, jadi ada beberapa aturan:
 - qty berbentuk teks dengan format Indonesia (`"1.234,5"`) **sengaja tidak dikonversi otomatis** supaya tidak salah tebak. Kasus ini dilaporkan sebagai `QTY_STRING`.
 - Tanggal yang tersimpan sebagai string tidak tertangkap filter periode. Kasus ini dilaporkan sebagai `TANGGAL_BUKAN_DATE`.
 - Untuk field di dalam array, tipe `int` dan `double` hanya terbaca sebagai `int/double` (keterbatasan di sisi klien).
-- Transaksi yang di-*hard delete* tidak bisa dilacak langsung. Jejaknya hanya terlihat dari referensi yang yatim (Fase 2).
+- Transaksi yang di-*hard delete* tidak bisa dilacak langsung. Jejaknya terlihat dari referensi yang yatim (`SUMBER_HILANG` di kartu stok).
+- `01-mutasi` menjumlahkan qty apa adanya. Kode dengan `SATUAN_CAMPUR` **tidak dikonversi** (konversi satuan via `tbl_konversiunit` belum dipakai).
+- Ledger `tbl_stok` tidak mencatat stok material di lantai produksi (receiving & konsumsi produksi dilacak lewat counter `qtyUse`). Saldo material di `01-mutasi` = saldo gudang.
+- Urutan baris dengan tanggal persis sama: IN dulu, lalu OUT, lalu urutan `_id`.

@@ -14,7 +14,7 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 const DIR_TOOL = path.join(ROOT, 'src', 'tools');
 const DIR_DIST = path.join(ROOT, 'dist');
-const URUTAN_LIB = ['tanggal', 'teks', 'tabel', 'bson', 'mapping', 'sumber', 'runner'];
+const URUTAN_LIB = ['tanggal', 'teks', 'tabel', 'bson', 'mapping', 'sumber', 'mutasi', 'runner'];
 
 const REGION_NODE = /[ \t]*\/\/ #region node-only\n[\s\S]*?\/\/ #endregion[ \t]*\n?/g;
 const REGION_CONFIG = /\/\/ #region config\n([\s\S]*?)\/\/ #endregion[ \t]*\n?/;

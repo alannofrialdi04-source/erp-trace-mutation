@@ -10,10 +10,16 @@ var FIELD_WAJIB = ['tanggal', 'companyCode', 'kodeBarang', 'qty'];
 var FIELD_OPSIONAL = [
   'noTransaksi', 'idAsal', 'idDokumen', 'noAju', 'noReg', 'noUrut',
   'jenisDokumen', 'satuan', 'gudang', 'createdAt',
+  // asal = modul asal transaksi (mis. tbl_stok.asal), proses = lokasi/proses produksi,
+  // dihapus = penanda soft delete (mis. isDeleted)
+  'asal', 'proses', 'dihapus',
 ];
 var ARAH_STATIS = ['IN', 'OUT', 'TANDA_QTY'];
 var KONVERSI_LINK = ['toObjectId', 'toString'];
-var KUNCI_SUMBER = ['label', 'koleksi', 'arah', 'kategori', 'hitungMutasi', 'filter', 'field', 'header'];
+var KUNCI_SUMBER = ['label', 'koleksi', 'arah', 'kategori', 'hitungMutasi', 'filter', 'field', 'header', 'rujukan'];
+var KUNCI_MAPPING = ['meta', 'timezone', 'sumber', 'master'];
+var FIELD_MASTER_WAJIB = ['kodeBarang'];
+var FIELD_MASTER_OPSIONAL = ['companyCode', 'nama', 'kategori', 'satuan'];
 var KUNCI_HEADER = ['koleksi', 'localField', 'foreignField', 'konversi', 'filter', 'field'];
 
 function _objekBiasa(v) {
@@ -52,7 +58,69 @@ function daftarKoleksiMapping(mapping) {
       hasil.push(s.header.koleksi);
     }
   }
+  if (_objekBiasa(mapping.master) && _teksIsi(mapping.master.koleksi) && hasil.indexOf(mapping.master.koleksi) < 0) {
+    hasil.push(mapping.master.koleksi);
+  }
   return hasil;
+}
+
+/**
+ * Sumber yang dirujuk oleh baris ledger, berdasarkan nilai asal & arah.
+ * Kunci 'ASAL:ARAH' didahulukan, lalu 'ASAL'. Hasil: nama sumber atau null.
+ */
+function sumberRujukan(sumber, asal, arah) {
+  if (!sumber || !_objekBiasa(sumber.rujukan) || asal === null || asal === undefined) return null;
+  var kunciLengkap = String(asal) + ':' + String(arah);
+  if (_teksIsi(sumber.rujukan[kunciLengkap])) return sumber.rujukan[kunciLengkap];
+  if (_teksIsi(sumber.rujukan[String(asal)])) return sumber.rujukan[String(asal)];
+  return null;
+}
+
+function _validasiRujukan(mapping, err) {
+  var kunci = Object.keys(mapping.sumber);
+  for (var i = 0; i < kunci.length; i++) {
+    var s = mapping.sumber[kunci[i]];
+    if (!_objekBiasa(s) || s.rujukan === undefined || s.rujukan === null) continue;
+    var p = 'sumber.' + kunci[i] + '.rujukan';
+    if (!_objekBiasa(s.rujukan) || Object.keys(s.rujukan).length === 0) {
+      err(p, 'harus berupa objek { nilaiAsal: "namaSumber" } yang tidak kosong');
+      continue;
+    }
+    if (!lokasiField(s, 'idAsal')) err(p, 'rujukan butuh field "idAsal" dipetakan di sumber ini');
+    if (!lokasiField(s, 'asal')) err(p, 'rujukan butuh field "asal" dipetakan di sumber ini');
+    var kr = Object.keys(s.rujukan);
+    for (var j = 0; j < kr.length; j++) {
+      var tujuan = s.rujukan[kr[j]];
+      if (!_teksIsi(tujuan) || !_objekBiasa(mapping.sumber[tujuan])) {
+        err(p + '.' + kr[j], 'menunjuk ke sumber "' + tujuan + '" yang tidak ada di MAPPING.sumber');
+      } else if (tujuan === kunci[i]) {
+        err(p + '.' + kr[j], 'tidak boleh merujuk ke dirinya sendiri');
+      }
+    }
+  }
+}
+
+function _validasiMaster(master, err, warn) {
+  var p = 'master';
+  if (!_objekBiasa(master)) {
+    err(p, 'harus berupa objek { koleksi, field }');
+    return;
+  }
+  _kunciAsing(p, master, ['koleksi', 'field'], warn);
+  if (!_teksIsi(master.koleksi)) err(p + '.koleksi', 'wajib diisi nama koleksi master barang');
+  if (!_objekBiasa(master.field)) {
+    err(p + '.field', 'wajib berupa objek { kodeBarang, companyCode, nama, kategori, satuan }');
+    return;
+  }
+  var dikenal = FIELD_MASTER_WAJIB.concat(FIELD_MASTER_OPSIONAL);
+  var kf = Object.keys(master.field);
+  for (var i = 0; i < kf.length; i++) {
+    if (dikenal.indexOf(kf[i]) < 0) warn(p + '.field.' + kf[i], 'field master tidak dikenal. Yang dikenal: ' + dikenal.join(', '));
+    else if (!_teksIsi(master.field[kf[i]])) err(p + '.field.' + kf[i], 'harus berupa nama field (teks)');
+  }
+  for (var j = 0; j < FIELD_MASTER_WAJIB.length; j++) {
+    if (!_teksIsi(master.field[FIELD_MASTER_WAJIB[j]])) err(p + '.field.' + FIELD_MASTER_WAJIB[j], 'wajib diisi');
+  }
 }
 
 /** Deskripsi singkat arah untuk laporan */
@@ -226,8 +294,11 @@ function validasiMapping(mapping) {
     err('sumber', 'minimal satu sumber harus didefinisikan');
     return { error: error, peringatan: peringatan };
   }
+  _kunciAsing('mapping', mapping, KUNCI_MAPPING, warn);
   var kunci = Object.keys(mapping.sumber);
   for (var i = 0; i < kunci.length; i++) _validasiSumber(kunci[i], mapping.sumber[kunci[i]], err, warn);
+  _validasiRujukan(mapping, err);
+  if (mapping.master !== undefined && mapping.master !== null) _validasiMaster(mapping.master, err, warn);
   return { error: error, peringatan: peringatan };
 }
 
@@ -239,6 +310,7 @@ module.exports = {
   lokasiField: lokasiField,
   daftarKoleksiMapping: daftarKoleksiMapping,
   ringkasArah: ringkasArah,
+  sumberRujukan: sumberRujukan,
   validasiMapping: validasiMapping,
 };
 // #endregion

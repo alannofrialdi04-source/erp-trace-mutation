@@ -1,103 +1,130 @@
 /**
- * MAPPING SUMBER MUTASI
- * =====================
+ * MAPPING SUMBER MUTASI: database erpgarment
+ * ==========================================
  * Satu-satunya file yang perlu disesuaikan dengan struktur database ERP.
  * Setelah diubah, jalankan `npm run build` supaya semua file di dist/ ikut terbarui.
  *
- * STATUS SAAT INI: ASUMSI
- *   Nama koleksi diambil dari daftar koleksi yang sudah disebutkan.
- *   Nama field, arah, kategori, dan relasi header MASIH TEBAKAN.
- *   Verifikasi dengan:
- *     1. dist/00-profil-skema.js  -> lihat field & tipe data yang sebenarnya
- *     2. dist/00-cek-mapping.js   -> cek apakah mapping ini cocok dengan data
+ * DASAR MAPPING INI (00-peta-data, 2026-11-05, MongoDB 8.0.1, companyCode WAG)
+ *   - tbl_stok adalah ledger mutasi aplikasi. Jumlah dokumen & total qty-nya sama persis
+ *     dengan transaksi sumber untuk MATERIALOUT (qtyKeluarOk), DELIVERY (jmlKeluarOk),
+ *     PRODUCTION RESULT, TRANSFER, DEADSTOK, SCRAP. INCOMING selisih 10 dokumen.
+ *     -> Mutasi dihitung dari ledger (sumber "stok", hitungMutasi: true).
+ *   - Sumber lain dipakai untuk menelusuri dokumen asal tiap baris ledger (rujukan via idAsal),
+ *     tidak ikut dihitung (hitungMutasi: false) supaya tidak dobel.
+ *   - Tidak masuk ledger: barang masuk (dok BC; yang masuk ledger adalah incoming/GRN),
+ *     receiving & konsumsi produksi (dilacak lewat counter qtyUse), penyesuaian
+ *     (qtySesuai hampir semua 0; pengurangan stok dibuat sebagai material keluar).
+ *
+ * MASIH PERLU DIPASTIKAN (lihat kolom CEK di kartu stok 01-mutasi)
+ *   - qty incoming yang dipakai ledger: qtyWh (asumsi) atau qty.
  *
  * FORMAT PER SUMBER
  *   label        : nama yang tampil di laporan
- *   koleksi      : nama koleksi detail transaksi
- *   arah         : 'IN' | 'OUT'
- *                  | 'TANDA_QTY'  (qty bertanda: positif = IN, negatif = OUT)
- *                  | { field: 'jenis', dari: 'detail' | 'header', nilai: { TAMBAH: 'IN', KURANG: 'OUT' } }
- *                    (nilai dibandingkan setelah trim + huruf besar)
- *   kategori     : bebas, mis. 'BB' (bahan baku) / 'BJ' (barang jadi)
- *   hitungMutasi : false = tidak ikut dihitung di saldo
- *                  (mis. modul yang mencatat transaksi yang sama dengan modul lain)
- *   filter       : filter MongoDB tambahan untuk dokumen yang valid,
- *                  mis. { isDeleted: { $ne: true }, status: 'POSTED' }
+ *   koleksi      : nama koleksi transaksi
+ *   arah         : 'IN' | 'OUT' | 'TANDA_QTY' | { field, dari: 'detail'|'header', nilai: { NILAI: 'IN'|'OUT' } }
+ *   kategori     : bebas (informasi)
+ *   hitungMutasi : true = ikut dihitung di saldo (default), false = hanya untuk penelusuran
+ *   filter       : filter MongoDB tambahan untuk dokumen yang dihitung
  *   field        : { fieldLogis: 'namaFieldDiDokumen' }
  *                  wajib    : tanggal, companyCode, kodeBarang, qty
- *                  opsional : noTransaksi, idAsal, idDokumen, noAju, noReg, noUrut,
- *                             jenisDokumen, satuan, gudang, createdAt
- *   header       : (opsional) kalau sebagian field ada di koleksi header
- *                  {
- *                    koleksi      : 'tbl_xxxheader',
- *                    localField   : field di detail yang menunjuk ke header,
- *                    foreignField : field kunci di header (default '_id'),
- *                    konversi     : null | 'toObjectId' | 'toString'
- *                                   (kalau tipe localField beda dengan foreignField),
- *                    filter       : filter tambahan untuk header (kondisi per field),
- *                    field        : { fieldLogis: 'namaFieldDiHeader' }
- *                  }
+ *                  opsional : noTransaksi, idAsal, idDokumen, noAju, noReg, noUrut, jenisDokumen,
+ *                             satuan, gudang, createdAt, asal, proses, dihapus
+ *   header       : (opsional) field yang ada di koleksi header, lihat README
+ *   rujukan      : (opsional, untuk ledger) { 'ASAL' atau 'ASAL:ARAH': 'namaSumber' }
+ *                  idAsal baris ledger dicari ke _id koleksi sumber yang dirujuk
+ *
+ * MASTER BARANG
+ *   master.field : kodeBarang (wajib), companyCode, nama, kategori, satuan
  */
 module.exports = {
   meta: {
-    status: 'ASUMSI', // 'ASUMSI' | 'TERVERIFIKASI'
-    catatan: 'Nama field masih tebakan, belum diverifikasi dengan data asli.',
+    status: 'TERVERIFIKASI',
+    catatan: 'Nama koleksi/field diverifikasi dengan profil schema & 00-peta-data erpgarment 2026-11-05. ' +
+      'qty incoming (qtyWh) belum dicocokkan per dokumen.',
   },
 
   // Zona waktu untuk batas periode & tampilan tanggal (WIB)
   timezone: '+07:00',
 
+  master: {
+    koleksi: 'tbl_barang',
+    field: {
+      kodeBarang: 'kodeBarang',
+      companyCode: 'companyCode',
+      nama: 'namaBarang',
+      kategori: 'jenisBc', // MATERIAL | BARANG SETENGAH JADI | BARANG JADI | MESIN | SCRAP
+      satuan: 'satuan',
+    },
+  },
+
   sumber: {
-    incoming: {
-      label: 'Incoming Warehouse',
-      koleksi: 'tbl_incomingdetail',
-      arah: 'IN',
-      kategori: 'BB',
+    // ------------------------------------------------------------ LEDGER (dihitung)
+    stok: {
+      label: 'Ledger stok',
+      koleksi: 'tbl_stok',
+      arah: { field: 'jenis', nilai: { IN: 'IN', OUT: 'OUT' } },
       field: {
         tanggal: 'tanggal',
         companyCode: 'companyCode',
         kodeBarang: 'kodeBarang',
         qty: 'qty',
+        satuan: 'satuan',
         idAsal: 'idAsal',
-        idDokumen: 'idDokumen',
-        noAju: 'noAju',
-        noReg: 'noReg',
-        noUrut: 'noUrut',
+        asal: 'asal', // INCOMING | MATERIALOUT | DELIVERY | PRODUCTION | TRANSFER | DEADSTOK | SCRAP
+        proses: 'namaProses',
+      },
+      // Hasil relasi 00-peta-data: idAsal per asal menunjuk ke koleksi berikut (100%)
+      rujukan: {
+        INCOMING: 'incoming',
+        MATERIALOUT: 'materialKeluar',
+        DELIVERY: 'delivery',
+        PRODUCTION: 'produksiHasil',
+        TRANSFER: 'transferProduksi',
+        'DEADSTOK:IN': 'deadstokMasuk',
+        'DEADSTOK:OUT': 'deadstokKeluar',
+        'SCRAP:IN': 'scrapMasuk',
+        'SCRAP:OUT': 'scrapKeluar',
       },
     },
 
-    barangMasuk: {
-      label: 'Barang Masuk',
-      koleksi: 'tbl_barangmasukdetail',
+    // ---------------------------------------------- SUMBER TRANSAKSI (penelusuran)
+    incoming: {
+      label: 'Incoming (GRN)',
+      koleksi: 'tbl_incomingdetail',
       arah: 'IN',
-      kategori: 'BB',
-      // ASUMSI: kemungkinan mencatat transaksi yang sama dengan incoming.
-      // Dimatikan dari hitungan saldo sampai dipastikan di Fase 1.
       hitungMutasi: false,
       field: {
-        tanggal: 'tanggal',
+        tanggal: 'tglMasuk',
         companyCode: 'companyCode',
         kodeBarang: 'kodeBarang',
-        qty: 'qty',
-        idAsal: 'idAsal',
+        qty: 'qtyWh', // ASUMSI: ledger memakai qty gudang (qtyWh/satuanWh), bukan qty dokumen
+        satuan: 'satuanWh',
+        noTransaksi: 'noReg',
+        idAsal: 'idAsal', // -> tbl_barangmasukdetail (dokumen BC)
+        jenisDokumen: 'idDokumen',
         noAju: 'noAju',
-        noReg: 'noReg',
         noUrut: 'noUrut',
+        dihapus: 'isDeleted',
       },
     },
 
     materialKeluar: {
-      label: 'Material Out',
+      label: 'Material keluar',
       koleksi: 'tbl_materialkeluardetail',
       arah: 'OUT',
-      kategori: 'BB',
+      hitungMutasi: false,
       field: {
-        tanggal: 'tanggal',
+        tanggal: 'tglKeluar',
         companyCode: 'companyCode',
-        kodeBarang: 'kodeBarang', // bisa jadi 'kodeMaterial'
-        qty: 'qty',
-        idAsal: 'idAsal',
+        kodeBarang: 'kodeMaterial', // kodeBarang di koleksi ini = kode barang jadi tujuan
+        qty: 'qtyKeluarOk',
+        satuan: 'satuanKeluarOk',
+        noTransaksi: 'noReg',
+        idAsal: 'idAsal', // -> tbl_incomingdetail (lot)
+        jenisDokumen: 'idDokumen',
+        noAju: 'noAju',
         noUrut: 'noUrut',
+        dihapus: 'isDeleted',
       },
     },
 
@@ -105,83 +132,151 @@ module.exports = {
       label: 'Delivery',
       koleksi: 'tbl_deliverydetail',
       arah: 'OUT',
-      kategori: 'BJ',
-      field: {
-        tanggal: 'tanggal',
-        companyCode: 'companyCode',
-        kodeBarang: 'kodeBarang',
-        qty: 'qty',
-        idAsal: 'idAsal',
-        idDokumen: 'idDokumen',
-        noAju: 'noAju',
-        noReg: 'noReg',
-        noUrut: 'noUrut',
-      },
-    },
-
-    produksi: {
-      label: 'Production',
-      koleksi: 'tbl_productiondetail',
-      arah: 'IN',
-      kategori: 'BJ',
-      field: {
-        tanggal: 'tanggal',
-        companyCode: 'companyCode',
-        kodeBarang: 'kodeBarang',
-        qty: 'qty',
-        idAsal: 'idAsal',
-      },
-    },
-
-    receivingProduksi: {
-      label: 'Production Receiving',
-      koleksi: 'tbl_receivingproduction',
-      arah: 'IN',
-      kategori: 'BJ',
-      // ASUMSI: kemungkinan tumpang tindih dengan produksi. Dipastikan di Fase 1.
       hitungMutasi: false,
       field: {
+        tanggal: 'tglKeluar',
+        companyCode: 'companyCode',
+        kodeBarang: 'kodeBarang',
+        qty: 'jmlKeluarOk',
+        satuan: 'satuan', // satuanKeluarOk hanya terisi sebagian kecil
+        noTransaksi: 'noReg',
+        idAsal: 'idAsal',
+        jenisDokumen: 'idDokumen',
+        noAju: 'noAju',
+        noUrut: 'noUrut',
+        dihapus: 'isDeleted',
+      },
+    },
+
+    produksiHasil: {
+      label: 'Hasil produksi',
+      koleksi: 'tbl_productiondetail',
+      arah: 'IN',
+      hitungMutasi: false,
+      filter: { info: { $in: ['result', 'scrap'] } },
+      field: {
         tanggal: 'tanggal',
         companyCode: 'companyCode',
         kodeBarang: 'kodeBarang',
         qty: 'qty',
-        idAsal: 'idAsal',
+        satuan: 'satuan',
+        noTransaksi: 'noReg',
+        idAsal: 'idAsalProduksi',
+        jenisDokumen: 'jenisDokumenBc',
+        proses: 'namaProses',
+        dihapus: 'isDeleted',
       },
     },
 
     transferProduksi: {
-      label: 'Transfer Production',
+      label: 'Transfer antar proses',
       koleksi: 'tbl_transferproduction',
-      arah: 'OUT', // ASUMSI: arah belum diketahui
-      kategori: 'BB',
+      arah: 'OUT',
       hitungMutasi: false,
       field: {
         tanggal: 'tanggal',
         companyCode: 'companyCode',
         kodeBarang: 'kodeBarang',
         qty: 'qty',
-        idAsal: 'idAsal',
+        satuan: 'satuan',
+        noTransaksi: 'noReg',
+        idAsal: 'idAsal', // -> tbl_productiondetail (hasil)
+        jenisDokumen: 'jenisDokumenBc',
+        proses: 'namaProses',
+        dihapus: 'isDeleted',
       },
     },
 
-    penyesuaian: {
-      label: 'Stock Adjustment',
-      koleksi: 'tbl_stokpenyesuaiandetail',
-      arah: { field: 'jenis', dari: 'detail', nilai: { TAMBAH: 'IN', KURANG: 'OUT' } },
+    deadstokMasuk: {
+      label: 'Deadstock (kode DS masuk)',
+      koleksi: 'tbl_deadstokdetail',
+      arah: 'IN',
+      hitungMutasi: false,
       field: {
+        tanggal: 'tanggal',
+        companyCode: 'companyCode',
         kodeBarang: 'kodeBarang',
         qty: 'qty',
+        satuan: 'satuan',
+        noTransaksi: 'nomorLapor',
+        idAsal: 'idAsalIncoming',
+        jenisDokumen: 'idDokumen',
+        noAju: 'noAju',
+        noUrut: 'noUrut',
       },
-      header: {
-        koleksi: 'tbl_stokpenyesuaianheader',
-        localField: 'idHeader',
-        foreignField: '_id',
-        konversi: 'toObjectId',
-        field: {
-          tanggal: 'tanggal',
-          companyCode: 'companyCode',
-          noTransaksi: 'noDokumen',
-        },
+    },
+
+    deadstokKeluar: {
+      label: 'Deadstock (kode asal keluar)',
+      koleksi: 'tbl_deadstokdetail',
+      arah: 'OUT',
+      hitungMutasi: false,
+      field: {
+        tanggal: 'tanggal',
+        companyCode: 'companyCode',
+        kodeBarang: 'kodeBarangAsal',
+        qty: 'qty',
+        satuan: 'satuan',
+        noTransaksi: 'nomorLapor',
+        idAsal: 'idAsalIncoming',
+        jenisDokumen: 'idDokumen',
+        noAju: 'noAju',
+        noUrut: 'noUrut',
+      },
+    },
+
+    scrapMasuk: {
+      label: 'Scrap masuk',
+      koleksi: 'exim_scrapdetail',
+      arah: 'IN',
+      hitungMutasi: false,
+      field: {
+        tanggal: 'tanggal',
+        companyCode: 'companyCode',
+        kodeBarang: 'kodeBarang',
+        qty: 'qty',
+        satuan: 'satuan',
+        noTransaksi: 'noReg',
+        dihapus: 'isDeleted',
+      },
+    },
+
+    scrapKeluar: {
+      label: 'Scrap keluar (ex BC)',
+      koleksi: 'exim_scrapexbc',
+      arah: 'OUT',
+      hitungMutasi: false,
+      field: {
+        tanggal: 'tanggal',
+        companyCode: 'companyCode',
+        kodeBarang: 'kodeBarang',
+        qty: 'qty',
+        satuan: 'satuan',
+        noTransaksi: 'noReg',
+        idAsal: 'idProduksi',
+        dihapus: 'isDeleted',
+      },
+    },
+
+    // Dokumen pabean pemasukan. Tidak masuk ledger (yang masuk ledger adalah incoming/GRN
+    // yang merujuk ke sini lewat idAsal). Disimpan untuk pemeriksaan dok BC vs GRN.
+    barangMasuk: {
+      label: 'Barang masuk (dokumen BC)',
+      koleksi: 'tbl_barangmasukdetail',
+      arah: 'IN',
+      hitungMutasi: false,
+      filter: { isReceiv: true },
+      field: {
+        tanggal: 'tglPenerimaan',
+        companyCode: 'companyCode',
+        kodeBarang: 'kodeBarang',
+        qty: 'qtyWh',
+        satuan: 'satuanWh',
+        noTransaksi: 'noReg',
+        jenisDokumen: 'idDokumen',
+        noAju: 'noAju',
+        noUrut: 'noUrut',
+        dihapus: 'isDeleted',
       },
     },
   },

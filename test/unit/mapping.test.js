@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { validasiMapping, daftarKoleksiMapping, lokasiField, ringkasArah } = require('../../src/lib/mapping');
+const { validasiMapping, daftarKoleksiMapping, lokasiField, ringkasArah, sumberRujukan } = require('../../src/lib/mapping');
 
 const salin = (o) => JSON.parse(JSON.stringify(o));
 const pathError = (hasil) => hasil.error.map((e) => e.path);
@@ -17,10 +17,47 @@ test('mapping uji valid', () => {
   assert.deepEqual(hasil.error, []);
 });
 
-test('daftar koleksi mencakup header, tanpa duplikat', () => {
+test('daftar koleksi mencakup header & master, tanpa duplikat', () => {
   const daftar = daftarKoleksiMapping(require('../../config/mapping'));
-  assert.equal(daftar.length, 9);
-  assert.ok(daftar.includes('tbl_stokpenyesuaianheader'));
+  assert.equal(daftar.length, 11);
+  assert.equal(new Set(daftar).size, daftar.length);
+  assert.ok(daftar.includes('tbl_stok'));
+  assert.ok(daftar.includes('tbl_barang'), 'koleksi master ikut');
+  assert.ok(daftarKoleksiMapping(require('../fixtures/mapping-uji')).includes('uji_penyesuaianheader'), 'koleksi header ikut');
+});
+
+test('rujukan ledger: sumber tujuan harus ada, butuh idAsal & asal', () => {
+  const m = salin(require('../../config/mapping'));
+  m.sumber.stok.rujukan.INCOMING = 'tidakAda';
+  m.sumber.stok.rujukan.STOK = 'stok';
+  assert.deepEqual(pathError(validasiMapping(m)), ['sumber.stok.rujukan.INCOMING', 'sumber.stok.rujukan.STOK']);
+  const m2 = salin(require('../../config/mapping'));
+  delete m2.sumber.stok.field.idAsal;
+  assert.deepEqual(pathError(validasiMapping(m2)), ['sumber.stok.rujukan']);
+});
+
+test('master: kodeBarang wajib, field tak dikenal jadi peringatan', () => {
+  const m = salin(require('../../config/mapping'));
+  delete m.master.field.kodeBarang;
+  m.master.field.warna = 'color';
+  const hasil = validasiMapping(m);
+  assert.deepEqual(hasil.error.map((e) => e.path), ['master.field.kodeBarang']);
+  assert.deepEqual(hasil.peringatan.map((p) => p.path), ['master.field.warna']);
+});
+
+test('properti level atas yang salah ketik -> peringatan', () => {
+  const m = salin(require('../../config/mapping'));
+  m.mastr = {};
+  assert.deepEqual(validasiMapping(m).peringatan.map((p) => p.path), ['mapping.mastr']);
+});
+
+test('sumberRujukan: kunci ASAL:ARAH didahulukan', () => {
+  const s = require('../../config/mapping').sumber.stok;
+  assert.equal(sumberRujukan(s, 'DEADSTOK', 'OUT'), 'deadstokKeluar');
+  assert.equal(sumberRujukan(s, 'DEADSTOK', 'IN'), 'deadstokMasuk');
+  assert.equal(sumberRujukan(s, 'INCOMING', 'IN'), 'incoming');
+  assert.equal(sumberRujukan(s, 'LAIN', 'IN'), null);
+  assert.equal(sumberRujukan(s, null, 'IN'), null);
 });
 
 test('field wajib yang belum dipetakan -> error', () => {

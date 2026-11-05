@@ -99,6 +99,9 @@ function _ekspresiArah(sumber) {
  *   opsi   : {
  *     filter : { companyCode, kodeBarang, tanggal: { gte, lt } }  (opsional)
  *     sampel : n  -> ambil n dokumen detail terbaru (urut _id menurun) SEBELUM lookup header
+ *     matchAwal : filter MongoDB mentah yang ditambahkan di $match pertama (mis. { _id: { $in: [...] } })
+ *     tanpaFilterSumber : true = abaikan sumber.filter (dipakai saat menelusuri dokumen
+ *                         yang dirujuk ledger, supaya dokumen yang "seharusnya tersaring" tetap terlihat)
  *   }
  *
  * Catatan performa: filter yang field-nya ada di header diterapkan SETELAH $lookup.
@@ -109,7 +112,8 @@ function bangunPipelineSumber(kunci, sumber, opsi) {
   var filter = _filterPerLokasi(kunci, sumber, opsi.filter || {});
   var pipeline = [];
 
-  var matchDetail = _gabungFilter(sumber.filter, filter.detail);
+  var filterTetap = opsi.tanpaFilterSumber ? null : sumber.filter;
+  var matchDetail = _gabungFilter(_gabungFilter(opsi.matchAwal, filterTetap), filter.detail);
   if (matchDetail) pipeline.push({ $match: matchDetail });
   if (opsi.sampel) {
     pipeline.push({ $sort: { _id: -1 } });
