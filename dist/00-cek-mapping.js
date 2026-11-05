@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- *  ERP Trace Mutation | 00-cek-mapping | v0.5.0
+ *  ERP Trace Mutation | 00-cek-mapping | v0.6.0
  *  Cek kecocokan MAPPING dengan data asli: koleksi, field, tipe, arah, dan relasi header
  * ----------------------------------------------------------------------------
  *  FILE HASIL BUILD. Yang boleh diedit hanya blok KONFIGURASI di bawah.
@@ -508,6 +508,32 @@ function jamLokal(date, tz) {
   if (!_tanggalValid(date)) return null;
   var d = _geserKeLokal(date, tz);
   return _duaDigit(d.getUTCHours()) + ':' + _duaDigit(d.getUTCMinutes());
+}
+
+/**
+ * Dugaan salah ketik tahun dari selisih hari (tanggal transaksi - tanggal registrasi).
+ * Hasil: jumlah tahun yang perlu ditambahkan ke tanggal transaksi (mis. 1 untuk 2024 -> 2025),
+ * negatif bila tanggal kelebihan tahun, atau 0 bila bukan pola salah tahun.
+ * Pola salah tahun = selisih hampir tepat kelipatan 365,25 hari (sisa <= batasHari).
+ */
+function dugaanSalahTahun(selisihHari, batasHari) {
+  var tahun = Math.round(Math.abs(selisihHari) / 365.25);
+  if (tahun < 1) return 0;
+  if (Math.abs(Math.abs(selisihHari) - tahun * 365.25) > batasHari) return 0;
+  return selisihHari < 0 ? tahun : -tahun;
+}
+
+/** 'YYYY-MM-DD' digeser n tahun; null bila tanggal hasilnya tidak ada (mis. 29 Februari) */
+function geserTahun(teks, n) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(teks));
+  if (!m) return null;
+  var hasil = (parseInt(m[1], 10) + n) + '-' + m[2] + '-' + m[3];
+  try {
+    _uraiTanggal(hasil);
+    return hasil;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ---- src/lib/teks.js ----
@@ -2174,5 +2200,5 @@ function render(hasil) {
   return baris;
 }
 
-return jalankanTool({"nama":"00-cek-mapping","judul":"Cek kecocokan MAPPING dengan data asli: koleksi, field, tipe, arah, dan relasi header","versi":"0.5.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
+return jalankanTool({"nama":"00-cek-mapping","judul":"Cek kecocokan MAPPING dengan data asli: koleksi, field, tipe, arah, dan relasi header","versi":"0.6.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
 })();

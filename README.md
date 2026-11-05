@@ -23,14 +23,15 @@ Saldo dihitung dengan model `Saldo Akhir = Saldo Awal + Pemasukan − Pengeluara
 
 ## Status
 
-Versi **0.5.0**: Fase 1 selesai, rekonsiliasi dengan hasil opname tersedia, deteksi minus per akhir hari.
+Versi **0.6.0**: Fase 1 selesai, rekonsiliasi dengan hasil opname, deteksi minus per akhir hari, deteksi salah ketik tanggal.
 
 | Fase | Isi | Status |
 |---|---|---|
 | 0 | Engine normalisasi berbasis mapping, helper periode WIB, build, test, tool `00-profil-skema` dan `00-cek-mapping` | Selesai |
 | 1 | `00-peta-data` (distribusi nilai kunci + relasi `idAsal`), mapping `erpgarment` berbasis ledger `tbl_stok`, `01-mutasi` (rekap saldo per kode + kartu stok dengan saldo berjalan dan cek per baris ke dokumen sumber) | Selesai |
 | 2 | `02-rekon-opname`: saldo buku vs MONSUS (monitoring khusus Bea Cukai = hasil opname) / stock opname per kode | Selesai |
-| 3 | `03-kronologi` (transaksi OUT bertanggal sebelum IN yang dirujuknya), duplikat, counter lot `qtyOut`/`qtyBalance` vs transaksi OUT, header `listDetail` vs koleksi detail, template koreksi data yang aman, CI | Belum |
+| 3 | `03-cek-tanggal`: tanggal transaksi vs tanggal registrasi di nomor dokumen (salah ketik tahun, backdate ekstrem) | Selesai |
+| 4 | Kronologi via `idAsal` (OUT bertanggal sebelum IN yang dirujuknya), duplikat, counter lot `qtyOut`/`qtyBalance` vs transaksi OUT, header `listDetail` vs koleksi detail, template koreksi data yang aman, CI | Belum |
 
 > **Dasar mapping.** Nama koleksi & field diverifikasi dengan profil schema dan `00-peta-data` (2026-11-05). Jumlah dokumen dan total qty `tbl_stok` sama persis dengan transaksi sumber untuk MATERIALOUT, DELIVERY, PRODUCTION, TRANSFER, DEADSTOK, dan SCRAP; INCOMING selisih 10 dokumen. Satu hal yang masih asumsi: ledger INCOMING diasumsikan memakai `qtyWh`. Kalau salah, kolom CEK kartu stok akan menunjukkan `QTY_BEDA` pada baris INCOMING.
 
@@ -375,6 +376,40 @@ OPN-ONLY    OPNAME OPN-ONLY                                      -      5       
 ```
 
 (potongan; baris lain tidak ditampilkan di sini. Dengan `TANGGAL_AWAL: '2025-01-01'`, `CT-001` menjadi COCOK karena transaksi bertanggal 2024 tidak dihitung.)
+
+### `03-cek-tanggal`: tanggal transaksi vs tanggal registrasi
+
+Nomor transaksi ERP memuat tanggal pembuatan dokumen (`GRN20251003-00383`, `TRFCUTTING20251208-00018`, `SCP-20251129-00001`). Tool ini membandingkan **tanggal transaksi** dengan **tanggal registrasi** itu, untuk setiap sumber di MAPPING yang punya field `noTransaksi`:
+
+- **Sebaran selisih:** `SESUAI` (0 s/d +`BATAS_MAJU_HARI`), mundur 1–7, 8–30, 31–60, lebih dari 60 hari, `MAJU`, dan tanpa tanggal registrasi.
+- **Anomali:** transaksi yang dicatat lebih dari `BATAS_MUNDUR_HARI` hari sebelum registrasi (`MUNDUR_JAUH`) atau sesudah registrasi (`MAJU`).
+- **`SALAH_TAHUN`:** kalau selisihnya hampir tepat kelipatan 1 tahun, diberi dugaan salah ketik tahun beserta saran tanggal yang benar.
+
+| CONFIG | Default | Keterangan |
+|---|---|---|
+| `COMPANY_CODE` | `'WAG'` | Filter companyCode |
+| `SUMBER` | `[]` | `[]` = semua sumber yang punya `noTransaksi` |
+| `PERIODE` | `null` | Batasi tanggal transaksi yang dicek |
+| `POLA_TANGGAL_REG` | `'(20\\d{2})(\\d{2})(\\d{2})'` | Regex tanggal di nomor transaksi (3 grup: tahun, bulan, tanggal) |
+| `BATAS_MUNDUR_HARI` | `60` | Batas backdate yang dianggap wajar |
+| `BATAS_MAJU_HARI` | `1` | Batas tanggal transaksi sesudah registrasi |
+| `TAMPIL_MAKS` / `BATAS_BARIS` | `50` / `5000` | Baris anomali di teks / maksimal yang diambil |
+
+Contoh (data dummy dari test):
+
+```text
+--- transferProduksi (tbl_transferproduction) | 2 dokumen --------------------
+Sebaran: SESUAI 1 | MUNDUR_LEBIH_60 1
+TANGGAL     TGL REG     SELISIH  NO. TRANSAKSI             KODE    QTY  JENIS / DUGAAN
+----------  ----------  -------  ------------------------  ------  ---  -------------------------
+2024-11-29  2025-12-08     -374  TRFCUTTING20251208-00018  CT-001  100  SALAH_TAHUN -> 2025-11-29
+
+--- incoming (tbl_incomingdetail) | 9 dokumen --------------------------------
+Sebaran: SESUAI 8 | MUNDUR_LEBIH_60 1
+TANGGAL     TGL REG     SELISIH  NO. TRANSAKSI      KODE       QTY  JENIS / DUGAAN
+----------  ----------  -------  -----------------  -------  -----  --------------
+2026-01-02  2026-03-15      -72  GRN20260315-00001  MAT-003  1.000  MUNDUR_JAUH
+```
 
 ---
 

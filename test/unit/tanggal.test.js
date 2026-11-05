@@ -65,3 +65,14 @@ test('format tanggal & jam lokal', () => {
   assert.equal(t.jamLokal(new Date('2026-11-30T16:59:59Z'), '+07:00'), '23:59');
   assert.equal(t.jamLokal(new Date('invalid'), '+07:00'), null);
 });
+
+test('dugaanSalahTahun & geserTahun', () => {
+  assert.equal(t.dugaanSalahTahun(-374, 60), 1, '2024-11-29 vs registrasi 2025-12-08');
+  assert.equal(t.dugaanSalahTahun(-72, 60), 0, 'backdate biasa');
+  assert.equal(t.dugaanSalahTahun(370, 60), -1, 'kelebihan satu tahun');
+  assert.equal(t.dugaanSalahTahun(-735, 60), 2);
+  assert.equal(t.dugaanSalahTahun(-200, 60), 0);
+  assert.equal(t.geserTahun('2024-11-29', 1), '2025-11-29');
+  assert.equal(t.geserTahun('2024-02-29', 1), null, '29 Feb 2025 tidak ada');
+  assert.equal(t.geserTahun('bukan', 1), null);
+});

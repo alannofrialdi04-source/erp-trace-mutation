@@ -10,6 +10,9 @@
  * FG-001   produksi 500, delivery 510, akhir -10                             => MINUS
  *          baris ledger: sumber dihapus, qty beda, sumber hilang, tanggal beda
  * CT-001   transfer bertanggal 2024-11-29 (sebelum cut-off 2025-08-18)       => SEBELUM_CUTOFF
+ *          noReg TRFCUTTING20251208-00018 -> salah ketik tahun (03-cek-tanggal)
+ * Nomor registrasi lain untuk 03-cek-tanggal: GRN20260315-00001 (backdate 72 hari),
+ *          OUT20260110-00001 (tanggal 12 hari setelah registrasi), 0001DS2026 (tanpa tanggal)
  * SHI      delivery kode yang tidak ada di master                            => MINUS + TIDAK_DI_MASTER
  * DS-MAT-001, S001  normal
  * MAT-004  saldo awal -5, di Januari: -3 (masih minus), 7, lalu -13         => transisi ke minus di OUT 20
@@ -111,7 +114,7 @@ module.exports = {
     incoming(INC.A1, 'MAT-001', 100, 'YRD', '2025-12-10T03:00:00Z', 'GRN20251210-00001'),
     incoming(INC.A2, 'MAT-001', 60, 'YRD', '2026-01-15T03:00:00Z', 'GRN20260115-00001'),
     incoming(INC.B1, 'MAT-002', 10, 'YRD', '2026-01-03T03:00:00Z', 'GRN20260103-00001'),
-    incoming(INC.C1, 'MAT-003', 1000, 'MTR', '2026-01-02T03:00:00Z', 'GRN20260102-00001'),
+    incoming(INC.C1, 'MAT-003', 1000, 'MTR', '2026-01-02T03:00:00Z', 'GRN20260315-00001'), // backdate 72 hari
     incoming(INC.D1, 'MAT-004', 2, 'YRD', '2026-01-02T04:00:00Z', 'GRN20260102-00002'),
     incoming(INC.D2, 'MAT-004', 10, 'YRD', '2026-01-03T04:00:00Z', 'GRN20260103-00002'),
     incoming(INC.E1, 'MAT-005', 2, 'YRD', '2026-01-05T04:00:00Z', 'GRN20260105-00001'),
@@ -142,12 +145,12 @@ module.exports = {
     delivery(DLV.D2, 'FG-001', 150, '2026-01-14T05:00:00Z', 'OUT20260114-00001', true),
     delivery(DLV.D3, 'FG-001', 100, '2026-01-16T05:00:00Z', 'OUT20260116-00001', false),
     delivery(DLV.D4, 'FG-001', 10, '2026-01-25T05:00:00Z', 'OUT20260125-00001', false),
-    delivery(DLV.SHI, 'SHI', 5, '2026-01-22T05:00:00Z', 'OUT20260122-00001', false),
+    delivery(DLV.SHI, 'SHI', 5, '2026-01-22T05:00:00Z', 'OUT20260110-00001', false), // tanggal 12 hari SETELAH registrasi
     delivery(DLV.D5, 'FG-0001', 3, '2026-01-15T05:00:00Z', 'OUT20260115-00001', false),
   ],
 
   tbl_transferproduction: [
-    { _id: OID(TRF.T1), companyCode: 'WAG', kodeBarang: 'CT-001', qty: DBL(100), satuan: 'PCE', tanggal: D('2024-11-29T05:00:00Z'), noReg: 'TRFCUTTING20241129-00001', namaProses: 'CUTTING', kodeProses: 'PROD2', kodeProsesTujuan: 'PROD1', jenisDokumenBc: 'BC 40', idAsal: PRD.CT, isDeleted: false },
+    { _id: OID(TRF.T1), companyCode: 'WAG', kodeBarang: 'CT-001', qty: DBL(100), satuan: 'PCE', tanggal: D('2024-11-29T05:00:00Z'), noReg: 'TRFCUTTING20251208-00018', namaProses: 'CUTTING', kodeProses: 'PROD2', kodeProsesTujuan: 'PROD1', jenisDokumenBc: 'BC 40', idAsal: PRD.CT, isDeleted: false },
     { _id: OID(TRF.T2), companyCode: 'WAG', kodeBarang: 'CT-001', qty: DBL(150), satuan: 'PCE', tanggal: D('2026-01-09T05:00:00Z'), noReg: 'TRFCUTTING20260109-00001', namaProses: 'CUTTING', kodeProses: 'PROD2', kodeProsesTujuan: 'PROD1', jenisDokumenBc: 'BC 40', idAsal: PRD.CT, isDeleted: false },
   ],
 
