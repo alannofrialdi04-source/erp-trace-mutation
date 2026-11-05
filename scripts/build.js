@@ -50,7 +50,9 @@ function metaTool(src, file) {
   const judul = ambil('judul');
   if (!nama || !judul) throw new Error(file + ': tag @nama dan @judul wajib ada');
   if (nama + '.js' !== file) throw new Error(file + ': @nama (' + nama + ') harus sama dengan nama file');
-  return { nama, judul, sisa: src.slice(doc[0].length) };
+  const tagMapping = ambil('mapping');
+  if (tagMapping !== null && tagMapping !== 'tidak') throw new Error(file + ': @mapping hanya boleh bernilai "tidak"');
+  return { nama, judul, pakaiMapping: tagMapping !== 'tidak', sisa: src.slice(doc[0].length) };
 }
 
 function cekNamaGanda(kode, file) {
@@ -113,7 +115,7 @@ function bangunTool(file, versi, lib, mapping) {
   ].join('\n');
   cekNamaGanda(isi, file);
 
-  const info = { nama: meta.nama, judul: meta.judul, versi: versi };
+  const info = { nama: meta.nama, judul: meta.judul, versi: versi, pakaiMapping: meta.pakaiMapping };
   return [
     kepala(meta, versi),
     'var TRACE_HASIL = (function () {',

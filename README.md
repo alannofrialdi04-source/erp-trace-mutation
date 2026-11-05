@@ -19,16 +19,16 @@ Saldo dihitung dengan model `Saldo Akhir = Saldo Awal + Pemasukan − Pengeluara
 
 ## Status
 
-Versi **0.1.0**: Fase 0 (fondasi).
+Versi **0.2.0**: Fase 1 sedang berjalan.
 
 | Fase | Isi | Status |
 |---|---|---|
 | 0 | Engine normalisasi berbasis mapping, helper periode WIB, build, test, tool `00-profil-skema` dan `00-cek-mapping` | Selesai |
-| 1 | Mapping sesuai data asli + `01-mutasi` (saldo awal, IN, OUT, penyesuaian, saldo akhir, kartu stok dengan saldo berjalan) | Menunggu struktur data asli |
-| 2 | `02-duplikat`, `03-orphan`, `04-anomali` | Belum |
-| 3 | `05-cross-module`, template koreksi data yang aman, CI | Belum |
+| 1 | `00-peta-data` (distribusi nilai kunci + relasi `idAsal`), mapping sesuai data asli, `01-mutasi` (saldo awal, IN, OUT, penyesuaian, saldo akhir, kartu stok dengan saldo berjalan) | Berjalan: `00-peta-data` selesai, mapping menunggu hasilnya |
+| 2 | `02-duplikat`, `03-orphan` (termasuk counter lot `qtyOut`/`qtyBalance` vs transaksi OUT), `04-anomali` | Belum |
+| 3 | `05-cross-module` (termasuk ledger `tbl_stok` vs transaksi sumber, header `listDetail` vs koleksi detail), template koreksi data yang aman, CI | Belum |
 
-> **Mapping masih berstatus ASUMSI.** Nama koleksi di `config/mapping.js` diambil dari daftar koleksi yang sudah diketahui, sedangkan nama field masih tebakan. Jalankan alur verifikasi di bawah sebelum hasil tool dipakai untuk mengambil keputusan.
+> **Mapping masih berstatus ASUMSI.** Struktur database `erpgarment` sudah diketahui dari profil schema, tetapi arti beberapa field (qty mana yang dipakai, arah penyesuaian, status yang dihitung) masih diverifikasi lewat `00-peta-data`. Jangan pakai hasil `00-cek-mapping` untuk mengambil keputusan sebelum mapping berstatus TERVERIFIKASI.
 
 ---
 
@@ -197,6 +197,41 @@ Contoh output (data dummy dari test):
               - PERINGATAN Arah tidak dikenali di 1 dokumen. Nilai asli: "KOREKSI" (1). Tambahkan ke arah.nilai bila memang valid.
 
 Ringkasan: 1 OK | 2 PERINGATAN | 0 ERROR
+```
+
+### `00-peta-data`: distribusi nilai kunci & relasi id
+
+Tool ini menjawab pertanyaan yang tidak bisa dijawab dari profil schema yang cuma memberi satu contoh nilai per field:
+
+- **Distribusi:** jumlah dokumen per kombinasi nilai, dihitung dari **seluruh** koleksi (bukan sampel). Bisa disertai total qty dan rentang tanggal (WIB) per kombinasi. Contohnya: `asal × jenis × namaProses` di `tbl_stok`, `approveStatus × isDeleted` di material keluar, atau perbandingan `qty = qtyWh` dan `satuan = satuanWh`.
+- **Relasi:** nilai field id (mis. `idAsal`) diambil sampelnya, lalu dicari ke `_id` **semua koleksi** (memakai index `_id`) dan ke array tertanam yang dipilih (`listDetail._id`). Hasilnya: field itu menunjuk ke koleksi mana dan berapa persen yang tidak ditemukan (calon data yatim). Kalau diberi `perNilai`, sampel dipecah per nilai field lain, mis. `tbl_stok.idAsal` per `asal`.
+
+CONFIG bawaan sudah berisi preset untuk database `erpgarment` (modul gudang, produksi, delivery, penyesuaian, opname, scrap, deadstock, dan `tbl_stok`).
+
+| CONFIG | Default | Keterangan |
+|---|---|---|
+| `COMPANY_CODE` | `'WAG'` | Filter companyCode; `null` = semua company |
+| `DISTRIBUSI` | preset | `{ koleksi, grup: [field \| { label, expr }], jumlah?, tanggal? }` |
+| `TOP` | `25` | Kombinasi yang ditampilkan per distribusi |
+| `RELASI` | preset | `{ koleksi, field, perNilai? }` |
+| `SAMPEL_RELASI` | `200` | Nilai id per relasi (maks 1.000) |
+| `TARGET_RELASI` | `[]` | Koleksi tujuan pencarian `_id`; `[]` = semua koleksi |
+| `TARGET_TERTANAM` | preset | `{ koleksi, path }` array id tertanam. Koleksi ini dipindai penuh, jadi daftarnya dibatasi |
+
+Contoh output (data dummy dari test):
+
+```text
+--- tbl_stok: asal x jenis ---------------------------------------------------
+4 dokumen, 2 kombinasi
+asal         jenis  DOK  TOTAL qty  tanggal (min s/d max)
+-----------  -----  ---  ---------  -------------------------
+MATERIALOUT  OUT      2         50  2025-11-05 s/d 2025-11-06
+INCOMING     IN       2        220  2025-11-01 s/d 2025-11-02
+
+tbl_materialkeluardetail.idAsal | sampel 3 nilai (format hex ObjectId 100%)
+    tbl_incomingdetail                  2  66,7%
+    tbl_incomingheader.listDetail       1  33,3%
+    tidak ditemukan di mana pun         1  33,3%
 ```
 
 ---

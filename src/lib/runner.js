@@ -61,15 +61,16 @@ function _headerTeks(meta, ctx) {
   var ketMapping = status === 'TERVERIFIKASI'
     ? 'TERVERIFIKASI'
     : (status || 'tanpa status') + ' (nama koleksi/field belum diverifikasi dengan data asli)';
-  return [
+  var baris = [
     garis,
     ' ERP Trace Mutation | ' + meta.tool + ' | v' + meta.versi,
     ' ' + ctx.info.judul,
     ' DB      : ' + meta.db + (meta.server ? ' (MongoDB ' + meta.server + ')' : ''),
     ' Waktu   : ' + formatLokal(ctx.waktu, ctx.tz) + ' ' + labelZona(ctx.tz),
-    ' Mapping : ' + ketMapping,
-    garis,
   ];
+  if (ctx.info.pakaiMapping !== false) baris.push(' Mapping : ' + ketMapping);
+  baris.push(garis);
+  return baris;
 }
 
 /**
@@ -107,7 +108,7 @@ function jalankanTool(info, configFile, mappingFile, fnJalankan, fnRender) {
       server: _versiServer(dbAktif),
       waktu: ctx.waktu,
       timezone: tz,
-      statusMapping: mapping && mapping.meta ? mapping.meta.status || null : null,
+      statusMapping: info.pakaiMapping !== false && mapping && mapping.meta ? mapping.meta.status || null : null,
     },
     hasil: hasil,
   };

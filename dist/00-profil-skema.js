@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- *  ERP Trace Mutation | 00-profil-skema | v0.1.0
+ *  ERP Trace Mutation | 00-profil-skema | v0.2.0
  *  Profil struktur koleksi: field, tipe data, keterisian, dan pola nilai (data asli disamarkan)
  * ----------------------------------------------------------------------------
  *  FILE HASIL BUILD. Yang boleh diedit hanya blok KONFIGURASI di bawah.
@@ -1150,15 +1150,16 @@ function _headerTeks(meta, ctx) {
   var ketMapping = status === 'TERVERIFIKASI'
     ? 'TERVERIFIKASI'
     : (status || 'tanpa status') + ' (nama koleksi/field belum diverifikasi dengan data asli)';
-  return [
+  var baris = [
     garis,
     ' ERP Trace Mutation | ' + meta.tool + ' | v' + meta.versi,
     ' ' + ctx.info.judul,
     ' DB      : ' + meta.db + (meta.server ? ' (MongoDB ' + meta.server + ')' : ''),
     ' Waktu   : ' + formatLokal(ctx.waktu, ctx.tz) + ' ' + labelZona(ctx.tz),
-    ' Mapping : ' + ketMapping,
-    garis,
   ];
+  if (ctx.info.pakaiMapping !== false) baris.push(' Mapping : ' + ketMapping);
+  baris.push(garis);
+  return baris;
 }
 
 /**
@@ -1196,7 +1197,7 @@ function jalankanTool(info, configFile, mappingFile, fnJalankan, fnRender) {
       server: _versiServer(dbAktif),
       waktu: ctx.waktu,
       timezone: tz,
-      statusMapping: mapping && mapping.meta ? mapping.meta.status || null : null,
+      statusMapping: info.pakaiMapping !== false && mapping && mapping.meta ? mapping.meta.status || null : null,
     },
     hasil: hasil,
   };
@@ -1514,5 +1515,5 @@ function render(hasil, ctx) {
   return baris;
 }
 
-return jalankanTool({"nama":"00-profil-skema","judul":"Profil struktur koleksi: field, tipe data, keterisian, dan pola nilai (data asli disamarkan)","versi":"0.1.0"}, CONFIG, MAPPING, jalankan, render);
+return jalankanTool({"nama":"00-profil-skema","judul":"Profil struktur koleksi: field, tipe data, keterisian, dan pola nilai (data asli disamarkan)","versi":"0.2.0","pakaiMapping":true}, CONFIG, MAPPING, jalankan, render);
 })();
